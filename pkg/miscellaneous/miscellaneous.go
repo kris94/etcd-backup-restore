@@ -34,7 +34,7 @@ func GetLatestFullSnapshotAndDeltaSnapList(store snapstore.SnapStore) (*snapstor
 	}
 
 	for index := len(snapList); index > 0; index-- {
-		if snapList[index-1].IsChunk {
+		if snapList[index-1].IsChunk || snapList[index-1].Kind == snapstore.SnapshotKindObject {
 			continue
 		}
 		if snapList[index-1].Kind == snapstore.SnapshotKindFull {

@@ -30,6 +30,7 @@ import (
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 	"github.com/prometheus/client_golang/prometheus"
 	cron "github.com/robfig/cron/v3"
@@ -530,6 +531,9 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.fullSnapshotTimer.C:
+			//if err := ssr.testObjectStore(); err != nil {
+			//	return err
+			//}
 			if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
 				return err
 			}
@@ -573,6 +577,50 @@ func (ssr *Snapshotter) resetFullSnapshotTimer() error {
 		ssr.fullSnapshotTimer.Reset(duration)
 	}
 	ssr.logger.Infof("Will take next full snapshot at time: %s", effective)
+
+	return nil
+}
+
+func (ssr *Snapshotter) testObjectStore() error {
+	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
+
+	ssr.logger.Infof("Listing objects...")
+	objects, err := os.List()
+	if err != nil {
+		return err
+	}
+
+	if len(objects) > 0 {
+		for _, obj := range objects {
+			ssr.logger.Infof("Reading object %v...", obj)
+			copyOp := &objectstore.CopyOperation{}
+			if err := os.Read(obj, copyOp); err != nil {
+				return err
+			}
+			ssr.logger.Infof("Contents of object %v is %v", obj, copyOp)
+
+			ssr.logger.Infof("Deleting object %v...", obj)
+			if err := os.Delete(obj); err != nil {
+				return err
+			}
+		}
+	} else {
+		obj := &objectstore.Object{
+			Kind:      objectstore.ObjectKindCopyOperation,
+			Name:      "test",
+			CreatedOn: time.Now(),
+		}
+		copyOp := &objectstore.CopyOperation{
+			Source:    false,
+			Owner:     "abc",
+			Initiated: time.Now(),
+			Status:    objectstore.OperationStatusInitiated,
+		}
+		ssr.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
+		if err := os.Write(obj, copyOp); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
