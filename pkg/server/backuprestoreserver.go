@@ -23,6 +23,8 @@ import (
 
 	"github.com/gardener/etcd-backup-restore/pkg/errors"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/gardener/etcd-backup-restore/pkg/defragmentor"
@@ -155,15 +157,19 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 	go handleSsrStopRequest(ctx, handler, ssr, ackCh, ssrStopCh)
 	go handleAckState(handler, ackCh)
 
+	timer := time.NewTimer(30 * time.Second)
+	os := objectstore.NewObjectStore(ss, b.logger)
+	go b.handleOperationEvents(timer, os, handler)
+
 	go defragmentor.DefragDataPeriodically(ctx, b.config.EtcdConnectionConfig, b.defragmentationSchedule, ssr.TriggerFullSnapshot, b.logger)
 
-	b.runEtcdProbeLoopWithSnapshotter(ctx, handler, ssr, ssrStopCh, ackCh)
+	b.runEtcdProbeLoopWithSnapshotter(ctx, os, handler, ssr, ssrStopCh, ackCh)
 	return nil
 }
 
 // runEtcdProbeLoopWithSnapshotter runs the etcd probe loop
 // for the case where snapshotter is configured correctly
-func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, handler *HTTPHandler, ssr *snapshotter.Snapshotter, ssrStopCh chan struct{}, ackCh chan struct{}) {
+func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, os objectstore.ObjectStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, ssrStopCh chan struct{}, ackCh chan struct{}) {
 	var (
 		err                       error
 		initialDeltaSnapshotTaken bool
@@ -182,6 +188,44 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			b.logger.Errorf("Failed to probe etcd: %v", err)
 			handler.SetStatus(http.StatusServiceUnavailable)
 			continue
+		}
+
+		b.logger.Infof("Getting copy operation...")
+		obj, copyOp, err := b.getCopyOperation(os)
+		if err != nil {
+			b.logger.Errorf("Failed to get copy operation: %v", err)
+			handler.SetStatus(http.StatusServiceUnavailable)
+			continue
+		}
+		if copyOp != nil {
+			if copyOp.Source {
+				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as source", copyOp.Owner, copyOp.Status, copyOp.Initiated)
+				if copyOp.Status == objectstore.OperationStatusInitial {
+					handler.SetStatus(http.StatusServiceUnavailable)
+
+					// Take the final full snapshot
+					b.logger.Infof("Taking final full snapshot...")
+					if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
+						b.logger.Errorf("Failed to take final full snapshot: %v", err)
+						continue
+					}
+
+					// Set copy operation status to Ready
+					b.logger.Infof("Setting copy operation status to Ready...")
+					copyOp.Status = objectstore.OperationStatusReady
+					if err := b.setCopyOperation(os, obj, copyOp); err != nil {
+						b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
+						continue
+					}
+				}
+				b.logger.Infof("Shutting down...")
+				return
+			} else {
+				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as destination", copyOp.Owner, copyOp.Status, copyOp.Initiated)
+				b.logger.Infof("Sleeping for 30 seconds...")
+				time.Sleep(30 * time.Second)
+				continue
+			}
 		}
 
 		// The decision to either take an initial delta snapshot or
@@ -336,4 +380,55 @@ func handleSsrStopRequest(ctx context.Context, handler *HTTPHandler, ssr *snapsh
 			return
 		}
 	}
+}
+
+func (b *BackupRestoreServer) handleOperationEvents(timer *time.Timer, os objectstore.ObjectStore, handler *HTTPHandler) {
+	for {
+		select {
+		case <-timer.C:
+			b.logger.Infof("Getting copy operation...")
+			if _, copyOp, _ := b.getCopyOperation(os); copyOp != nil {
+				b.logger.Infof("Copy operation found, stopping snapshotter...")
+				atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
+				handler.Logger.Info("Changing handler state...")
+				handler.ReqCh <- emptyStruct
+				handler.Logger.Info("Waiting for acknowledgment...")
+				<-handler.AckCh
+			}
+			timer.Reset(30 * time.Second)
+		}
+	}
+}
+
+func (b *BackupRestoreServer) getCopyOperation(os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
+	b.logger.Infof("Listing objects...")
+	objects, err := os.List()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(objects) == 0 {
+		return nil, nil, nil
+	}
+	if len(objects) > 1 {
+		return nil, nil, fmt.Errorf("multiple objects found")
+	}
+	if objects[0].Kind != objectstore.ObjectKindCopyOperation {
+		return nil, nil, fmt.Errorf("found object of kind different from CopyOperation")
+	}
+
+	b.logger.Infof("Reading object %v...", objects[0])
+	copyOp := &objectstore.CopyOperation{}
+	if err := os.Read(objects[0], copyOp); err != nil {
+		return nil, nil, err
+	}
+	return objects[0], copyOp, nil
+}
+
+func (b *BackupRestoreServer) setCopyOperation(os objectstore.ObjectStore, obj *objectstore.Object, copyOp *objectstore.CopyOperation) error {
+	b.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
+	if err := os.Write(obj, copyOp); err != nil {
+		return err
+	}
+	return nil
 }

@@ -509,10 +509,12 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 	for {
 		select {
 		case <-ssr.fullSnapshotReqCh:
-			s, err := ssr.TakeFullSnapshotAndResetTimer()
+			// TODO Testing only, remove
+			err := ssr.writeCopyOperation(true)
+			//s, err := ssr.TakeFullSnapshotAndResetTimer()
 			res := result{
-				Snapshot: s,
-				Err:      err,
+				//Snapshot: s,
+				Err: err,
 			}
 			ssr.fullSnapshotAckCh <- res
 			if err != nil {
@@ -520,10 +522,12 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.deltaSnapshotReqCh:
-			s, err := ssr.takeDeltaSnapshotAndResetTimer()
+			// TODO Testing only, remove
+			err := ssr.writeCopyOperation(false)
+			//s, err := ssr.takeDeltaSnapshotAndResetTimer()
 			res := result{
-				Snapshot: s,
-				Err:      err,
+				//Snapshot: s,
+				Err: err,
 			}
 			ssr.deltaSnapshotAckCh <- res
 			if err != nil {
@@ -531,9 +535,6 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.fullSnapshotTimer.C:
-			//if err := ssr.testObjectStore(); err != nil {
-			//	return err
-			//}
 			if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
 				return err
 			}
@@ -581,45 +582,25 @@ func (ssr *Snapshotter) resetFullSnapshotTimer() error {
 	return nil
 }
 
-func (ssr *Snapshotter) testObjectStore() error {
+// TODO Testing only, remove
+func (ssr *Snapshotter) writeCopyOperation(source bool) error {
 	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
 
-	ssr.logger.Infof("Listing objects...")
-	objects, err := os.List()
-	if err != nil {
-		return err
+	now := time.Now()
+	obj := &objectstore.Object{
+		Kind:      objectstore.ObjectKindCopyOperation,
+		Name:      "test",
+		CreatedOn: now,
 	}
-
-	if len(objects) > 0 {
-		for _, obj := range objects {
-			ssr.logger.Infof("Reading object %v...", obj)
-			copyOp := &objectstore.CopyOperation{}
-			if err := os.Read(obj, copyOp); err != nil {
-				return err
-			}
-			ssr.logger.Infof("Contents of object %v is %v", obj, copyOp)
-
-			ssr.logger.Infof("Deleting object %v...", obj)
-			if err := os.Delete(obj); err != nil {
-				return err
-			}
-		}
-	} else {
-		obj := &objectstore.Object{
-			Kind:      objectstore.ObjectKindCopyOperation,
-			Name:      "test",
-			CreatedOn: time.Now(),
-		}
-		copyOp := &objectstore.CopyOperation{
-			Source:    false,
-			Owner:     "abc",
-			Initiated: time.Now(),
-			Status:    objectstore.OperationStatusInitiated,
-		}
-		ssr.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
-		if err := os.Write(obj, copyOp); err != nil {
-			return err
-		}
+	copyOp := &objectstore.CopyOperation{
+		Source:    source,
+		Owner:     "foo",
+		Initiated: now,
+		Status:    objectstore.OperationStatusInitial,
+	}
+	ssr.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
+	if err := os.Write(obj, copyOp); err != nil {
+		return err
 	}
 
 	return nil

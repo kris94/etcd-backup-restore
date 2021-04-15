@@ -46,9 +46,8 @@ type ObjectList []*Object
 type OperationStatus string
 
 const (
-	OperationStatusInitiated  OperationStatus = "Initiated"
-	OperationStatusInProgress OperationStatus = "InProgress"
-	OperationStatusFinished   OperationStatus = "Finished"
+	OperationStatusInitial OperationStatus = "Initial"
+	OperationStatusReady   OperationStatus = "Ready"
 )
 
 type CopyOperation struct {
