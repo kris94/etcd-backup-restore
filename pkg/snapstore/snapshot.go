@@ -38,20 +38,43 @@ func NewSnapshot(kind string, startRevision, lastRevision int64, compressionSuff
 	return snap
 }
 
+// NewObjectSnapshot creates a new snapshot of type object.
+func NewObjectSnapshot(kind, name string, createdOn time.Time) *Snapshot {
+	snap := &Snapshot{
+		Kind:      SnapshotKindObject,
+		CreatedOn: createdOn,
+	}
+	snap.GenerateSnapshotDirectory()
+	snap.GenerateObjectSnapshotName(kind, name)
+	return snap
+}
+
 // GenerateSnapshotName prepares the snapshot name from metadata
 func (s *Snapshot) GenerateSnapshotName() {
 	s.SnapName = fmt.Sprintf("%s-%08d-%08d-%d%s", s.Kind, s.StartRevision, s.LastRevision, s.CreatedOn.Unix(), s.CompressionSuffix)
 }
 
+// GenerateObjectSnapshotName generates the snapshot name from the object metadata.
+func (s *Snapshot) GenerateObjectSnapshotName(kind, name string) {
+	s.SnapName = fmt.Sprintf("%s-%s-%s-%d", s.Kind, kind, name, s.CreatedOn.Unix())
+}
+
 // GenerateSnapshotDirectory prepares the snapshot directory name from metadata
 func (s *Snapshot) GenerateSnapshotDirectory() {
-	s.SnapDir = fmt.Sprintf("Backup-%d", s.CreatedOn.Unix())
+	s.SnapDir = fmt.Sprintf("%s-%d", s.GetDirectoryPrefix(), s.CreatedOn.Unix())
 }
 
 // GetSnapshotDirectoryCreationTimeInUnix returns the creation time for snapshot directory.
 func (s *Snapshot) GetSnapshotDirectoryCreationTimeInUnix() (int64, error) {
-	tok := strings.TrimPrefix(s.SnapDir, "Backup-")
+	tok := strings.TrimPrefix(s.SnapDir, fmt.Sprintf("%s-", s.GetDirectoryPrefix()))
 	return strconv.ParseInt(tok, 10, 64)
+}
+
+func (s *Snapshot) GetDirectoryPrefix() string {
+	if s.Kind == SnapshotKindObject {
+		return "Object"
+	}
+	return "Backup"
 }
 
 // ParseSnapshot parse <snapPath> to create snapshot structure
@@ -76,6 +99,8 @@ func ParseSnapshot(snapPath string) (*Snapshot, error) {
 		s.Kind = SnapshotKindFull
 	case SnapshotKindDelta:
 		s.Kind = SnapshotKindDelta
+	case SnapshotKindObject:
+		s.Kind = SnapshotKindObject
 	default:
 		return nil, fmt.Errorf("unknown snapshot kind: %s", tokens[0])
 	}
@@ -85,19 +110,21 @@ func ParseSnapshot(snapPath string) (*Snapshot, error) {
 		snapName = path.Join(snapName, tok[2])
 	}
 
-	//parse start revision
-	s.StartRevision, err = strconv.ParseInt(tokens[1], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid start revision: %s", tokens[1])
-	}
-	//parse last revision
-	s.LastRevision, err = strconv.ParseInt(tokens[2], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid last revision: %s", tokens[2])
-	}
+	if s.Kind != SnapshotKindObject {
+		//parse start revision
+		s.StartRevision, err = strconv.ParseInt(tokens[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start revision: %s", tokens[1])
+		}
+		//parse last revision
+		s.LastRevision, err = strconv.ParseInt(tokens[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid last revision: %s", tokens[2])
+		}
 
-	if s.StartRevision > s.LastRevision {
-		return nil, fmt.Errorf("last revision (%s) should be at least start revision(%s) ", tokens[2], tokens[1])
+		if s.StartRevision > s.LastRevision {
+			return nil, fmt.Errorf("last revision (%s) should be at least start revision(%s) ", tokens[2], tokens[1])
+		}
 	}
 
 	//parse creation time as well as parse the Snapshot compression suffix

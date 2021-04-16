@@ -30,6 +30,7 @@ import (
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 	"github.com/prometheus/client_golang/prometheus"
 	cron "github.com/robfig/cron/v3"
@@ -508,10 +509,12 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 	for {
 		select {
 		case <-ssr.fullSnapshotReqCh:
-			s, err := ssr.TakeFullSnapshotAndResetTimer()
+			// TODO Testing only, remove
+			err := ssr.writeCopyOperation(true)
+			//s, err := ssr.TakeFullSnapshotAndResetTimer()
 			res := result{
-				Snapshot: s,
-				Err:      err,
+				//Snapshot: s,
+				Err: err,
 			}
 			ssr.fullSnapshotAckCh <- res
 			if err != nil {
@@ -519,10 +522,12 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.deltaSnapshotReqCh:
-			s, err := ssr.takeDeltaSnapshotAndResetTimer()
+			// TODO Testing only, remove
+			err := ssr.writeCopyOperation(false)
+			//s, err := ssr.takeDeltaSnapshotAndResetTimer()
 			res := result{
-				Snapshot: s,
-				Err:      err,
+				//Snapshot: s,
+				Err: err,
 			}
 			ssr.deltaSnapshotAckCh <- res
 			if err != nil {
@@ -573,6 +578,30 @@ func (ssr *Snapshotter) resetFullSnapshotTimer() error {
 		ssr.fullSnapshotTimer.Reset(duration)
 	}
 	ssr.logger.Infof("Will take next full snapshot at time: %s", effective)
+
+	return nil
+}
+
+// TODO Testing only, remove
+func (ssr *Snapshotter) writeCopyOperation(source bool) error {
+	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
+
+	now := time.Now()
+	obj := &objectstore.Object{
+		Kind:      objectstore.ObjectKindCopyOperation,
+		Name:      "test",
+		CreatedOn: now,
+	}
+	copyOp := &objectstore.CopyOperation{
+		Source:    source,
+		Owner:     "foo",
+		Initiated: now,
+		Status:    objectstore.OperationStatusInitial,
+	}
+	ssr.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
+	if err := os.Write(obj, copyOp); err != nil {
+		return err
+	}
 
 	return nil
 }
