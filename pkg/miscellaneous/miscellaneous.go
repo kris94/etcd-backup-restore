@@ -54,3 +54,41 @@ func GetLatestFullSnapshotAndDeltaSnapList(store snapstore.SnapStore) (*snapstor
 	}
 	return fullSnapshot, deltaSnapList, nil
 }
+
+// Backup contains a full snapshot and all of its delta snapshots
+type Backup struct {
+	FullSnapshot      *snapstore.Snapshot
+	DeltaSnapshotList snapstore.SnapList
+}
+
+// GetAllFullSnapshotsAndDeltaSnapLists returns all the snapshots
+func GetAllBackups(store snapstore.SnapStore) ([]Backup, error) {
+	var (
+		backups    []Backup
+		curSnapDir string
+	)
+	snapList, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, snap := range snapList {
+		if snap.IsChunk || snap.Kind == snapstore.SnapshotKindObject {
+			continue
+		}
+		if curSnapDir != snap.SnapDir {
+			curSnapDir = snap.SnapDir
+			backups = append(backups, Backup{})
+		}
+		if snap.Kind == snapstore.SnapshotKindFull {
+			backups[len(backups)-1].FullSnapshot = snap
+			continue
+		}
+		backups[len(backups)-1].DeltaSnapshotList = append(backups[len(backups)-1].DeltaSnapshotList, snap)
+	}
+
+	for _, snap := range backups {
+		sort.Sort(snap.DeltaSnapshotList) // ensures that the delta snapshot list is well formed
+	}
+	return backups, nil
+}

@@ -30,6 +30,11 @@ import (
 	stiface "github.com/gardener/etcd-backup-restore/pkg/snapstore/gcs"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
+)
+
+const (
+	sourceStoreCredentials = "SOURCE_GOOGLE_APPLICATION_CREDENTIALS"
 )
 
 // GCSSnapStore is snapstore with GCS object store as backend.
@@ -47,9 +52,17 @@ const (
 )
 
 // NewGCSSnapStore create new GCSSnapStore from shared configuration with specified bucket.
-func NewGCSSnapStore(bucket, prefix, tempDir string, maxParallelChunkUploads uint) (*GCSSnapStore, error) {
+func NewGCSSnapStore(bucket, prefix, tempDir string, maxParallelChunkUploads uint, isSource bool) (*GCSSnapStore, error) {
 	ctx := context.TODO()
-	cli, err := storage.NewClient(ctx)
+	var opts []option.ClientOption
+	if isSource {
+		filename := os.Getenv(sourceStoreCredentials)
+		if filename == "" {
+			return nil, fmt.Errorf("Environment variable %s is not set.", sourceStoreCredentials)
+		}
+		opts = append(opts, option.WithCredentialsFile(filename))
+	}
+	cli, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

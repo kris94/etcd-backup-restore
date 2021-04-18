@@ -25,14 +25,19 @@ import (
 )
 
 const (
-	envStorageContainer = "STORAGE_CONTAINER"
-	defaultLocalStore   = "default.bkp"
+	envStorageContainer       = "STORAGE_CONTAINER"
+	sourceEnvStorageContainer = "SOURCE_STORAGE_CONTAINER"
+	defaultLocalStore         = "default.bkp"
 )
 
 // GetSnapstore returns the snapstore object for give storageProvider with specified container
 func GetSnapstore(config *Config) (SnapStore, error) {
 	if config.Container == "" {
-		config.Container = os.Getenv(envStorageContainer)
+		if config.IsSource {
+			config.Container = os.Getenv(sourceEnvStorageContainer)
+		} else {
+			config.Container = os.Getenv(envStorageContainer)
+		}
 	}
 
 	if len(config.TempDir) == 0 {
@@ -72,7 +77,7 @@ func GetSnapstore(config *Config) (SnapStore, error) {
 		if config.Container == "" {
 			return nil, fmt.Errorf("storage container name not specified")
 		}
-		return NewGCSSnapStore(config.Container, config.Prefix, config.TempDir, config.MaxParallelChunkUploads)
+		return NewGCSSnapStore(config.Container, config.Prefix, config.TempDir, config.MaxParallelChunkUploads, config.IsSource)
 	case SnapstoreProviderSwift:
 		if config.Container == "" {
 			return nil, fmt.Errorf("storage container name not specified")

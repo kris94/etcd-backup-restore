@@ -54,3 +54,17 @@ func (c *Config) Validate() error {
 func (c *Config) Complete() {
 	c.Prefix = path.Join(c.Prefix, backupFormatVersion)
 }
+
+// CompleteWithOther completes the config based on other config
+func (c *Config) CompleteWithOther(other *Config) {
+	if c.Provider == "" {
+		c.Provider = other.Provider
+	}
+	if c.Prefix == "" {
+		c.Prefix = other.Prefix
+	} else {
+		c.Prefix = path.Join(c.Prefix, backupFormatVersion)
+	}
+	c.MaxParallelChunkUploads = other.MaxParallelChunkUploads
+	c.TempDir = other.TempDir
+}

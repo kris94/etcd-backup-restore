@@ -17,29 +17,38 @@ package cmd
 import (
 	"context"
 
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
-// NewBackupRestoreCommand represents the base command when called without any subcommands
-func NewBackupRestoreCommand(ctx context.Context) *cobra.Command {
-	var RootCmd = &cobra.Command{
-		Use:   "etcdbrctl",
-		Short: "command line utility for etcd backup restore",
-		Long: `The etcdbrctl, command line utility, is built to support etcd's backup and restore
-related functionality. Sub-command for this root command will support features
-like scheduled snapshot of etcd, etcd data directory validation and restore etcd
-from previously taken snapshot.`,
+// NewSnapshotCommand create cobra command for snapshot
+func NewCopyCommand(ctx context.Context) *cobra.Command {
+	opts := newCopierOptions()
+	var command = &cobra.Command{
+		Use:   "copy",
+		Short: "copy data between buckets",
+		Long:  `Copy data between buckets`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if version {
-				printVersionInfo()
+			printVersionInfo()
+			logger := logrus.NewEntry(logrus.New())
+			if err := opts.validate(); err != nil {
+				logger.Fatalf("failed to validate the options: %v", err)
+				return
 			}
+			opts.complete()
+
+			copier := copier.NewCopier(opts.copierConfig, opts.snapstoreConfig, logger)
+
+			if err := copier.Run(); err != nil {
+				logger.Fatalf("Copy operation failed: %v", err)
+				return
+			}
+
+			logger.Info("Shutting down...")
+			return
 		},
 	}
-	RootCmd.Flags().BoolVarP(&version, "version", "v", false, "print version info")
-	RootCmd.AddCommand(NewSnapshotCommand(ctx),
-		NewRestoreCommand(ctx),
-		NewInitializeCommand(ctx),
-		NewServerCommand(ctx),
-		NewCopyCommand(ctx))
-	return RootCmd
+	opts.addFlags(command.Flags())
+	return command
 }
