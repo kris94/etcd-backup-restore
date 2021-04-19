@@ -108,6 +108,8 @@ type Config struct {
 	MaxParallelChunkUploads uint `json:"maxParallelChunkUploads,omitempty"`
 	// Temporary Directory
 	TempDir string `json:"tempDir,omitempty"`
+	// IsSource determines if this SnapStore is the source for a copy operation
+	IsSource bool `json:"isSource,omitempty"`
 }
 
 type chunk struct {
