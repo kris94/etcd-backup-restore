@@ -22,9 +22,9 @@ import (
 
 // Copier can be used to copy backups
 type Copier struct {
-	logger                *logrus.Entry
-	sourceSnapstoreConfig *snapstore.Config
-	snapstoreConfig       *snapstore.Config
+	logger          *logrus.Entry
+	sourceSnapStore snapstore.SnapStore
+	snapStore       snapstore.SnapStore
 }
 
 // Config holds the configuration for the copier

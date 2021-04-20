@@ -38,8 +38,12 @@ func NewCopyCommand(ctx context.Context) *cobra.Command {
 			}
 			opts.complete()
 
-			copier := copier.NewCopier(opts.copierConfig, opts.snapstoreConfig, logger)
+			destStorage, sourceStorage, err := copier.GetSourceAndDestinationStores(opts.copierConfig, opts.snapstoreConfig)
+			if err != nil {
+				logger.Fatalf("Could not get source and destination snapstores: %v", err)
+			}
 
+			copier := copier.NewCopier(destStorage, sourceStorage, logger)
 			if err := copier.Run(); err != nil {
 				logger.Fatalf("Copy operation failed: %v", err)
 				return
