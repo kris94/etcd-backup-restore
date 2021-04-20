@@ -48,6 +48,7 @@ type OperationStatus string
 const (
 	OperationStatusInitial OperationStatus = "Initial"
 	OperationStatusReady   OperationStatus = "Ready"
+	OperationStatusDone    OperationStatus = "Done"
 )
 
 type CopyOperation struct {

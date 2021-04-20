@@ -23,28 +23,32 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func GetSourceAndDestinationStores(config *Config, destSnapStoreConfig *snapstore.Config) (snapstore.SnapStore, snapstore.SnapStore, error) {
+	sourceSnapStore, err := snapstore.GetSnapstore(config.SourceSnapstore)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Could not retrieve source snapstore: %v", err)
+	}
+
+	destSnapStore, err := snapstore.GetSnapstore(destSnapStoreConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Could not retrieve destination snapstore: %v", err)
+	}
+
+	return sourceSnapStore, destSnapStore, nil
+}
+
 // NewCopier returns a new copier
-func NewCopier(config *Config, snapstoreConfig *snapstore.Config, logger *logrus.Entry) *Copier {
+func NewCopier(sourceSnapStore snapstore.SnapStore, snapStore snapstore.SnapStore, logger *logrus.Entry) *Copier {
 	return &Copier{
-		logger:                logger.WithField("actor", "snapshotter"),
-		sourceSnapstoreConfig: config.SourceSnapstore,
-		snapstoreConfig:       snapstoreConfig,
+		logger:          logger.WithField("actor", "snapshotter"),
+		sourceSnapStore: sourceSnapStore,
+		snapStore:       snapStore,
 	}
 }
 
 // Run runs the copy command
 func (c *Copier) Run() error {
-	source, err := snapstore.GetSnapstore(c.sourceSnapstoreConfig)
-	if err != nil {
-		return fmt.Errorf("Failed to get source snapstore: %v", err)
-	}
-
-	destination, err := snapstore.GetSnapstore(c.snapstoreConfig)
-	if err != nil {
-		return fmt.Errorf("Failed to get source snapstore: %v", err)
-	}
-
-	backups, err := miscellaneous.GetAllBackups(source)
+	backups, err := miscellaneous.GetAllBackups(c.sourceSnapStore)
 	if err != nil {
 		return fmt.Errorf("failed to get latest snapshot: %v", err)
 	}
@@ -53,22 +57,22 @@ func (c *Copier) Run() error {
 	}
 
 	for _, backup := range backups {
-		rc, err := source.Fetch(*backup.FullSnapshot)
+		rc, err := c.sourceSnapStore.Fetch(*backup.FullSnapshot)
 		if err != nil {
 			return fmt.Errorf("failed to get readerCloser form baseSnapshot")
 		}
 
-		if err := destination.Save(*backup.FullSnapshot, rc); err != nil {
+		if err := c.snapStore.Save(*backup.FullSnapshot, rc); err != nil {
 			return fmt.Errorf("failed to save snapshot to destination")
 		}
 
 		for _, deltaSnap := range backup.DeltaSnapshotList {
-			rc, err := source.Fetch(*deltaSnap)
+			rc, err := c.sourceSnapStore.Fetch(*deltaSnap)
 			if err != nil {
 				return fmt.Errorf("failed to get readerCloser form baseSnapshot")
 			}
 
-			if err := destination.Save(*deltaSnap, rc); err != nil {
+			if err := c.snapStore.Save(*deltaSnap, rc); err != nil {
 				return fmt.Errorf("failed to save snapshot to destination")
 			}
 		}
