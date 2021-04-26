@@ -90,13 +90,14 @@ func (b *BackupRestoreServer) Run(ctx context.Context) error {
 
 // startHTTPServer creates and starts the HTTP handler
 // with status 503 (Service Unavailable)
-func (b *BackupRestoreServer) startHTTPServer(initializer initializer.Initializer, ssr *snapshotter.Snapshotter) *HTTPHandler {
+func (b *BackupRestoreServer) startHTTPServer(initializer initializer.Initializer, ssr *snapshotter.Snapshotter, ss snapstore.SnapStore) *HTTPHandler {
 	// Start http handler with Error state and wait till snapshotter is up
 	// and running before setting the status to OK.
 	handler := &HTTPHandler{
 		Port:              b.config.ServerConfig.Port,
 		Initializer:       initializer,
 		Snapshotter:       ssr,
+		Store:             ss,
 		Logger:            b.logger,
 		StopCh:            make(chan struct{}),
 		EnableProfiling:   b.config.ServerConfig.EnableProfiling,
@@ -122,7 +123,7 @@ func (b *BackupRestoreServer) runServerWithoutSnapshotter(ctx context.Context, r
 
 	// If no storage provider is given, snapshotter will be nil, in which
 	// case the status is set to OK as soon as etcd probe is successful
-	handler := b.startHTTPServer(etcdInitializer, nil)
+	handler := b.startHTTPServer(etcdInitializer, nil, nil)
 	defer handler.Stop()
 
 	// start defragmentation without trigerring full snapshot
@@ -151,7 +152,19 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 		return err
 	}
 
-	handler := b.startHTTPServer(etcdInitializer, ssr)
+	var cpr *copier.Copier
+	if b.config.CopyBackups {
+		b.logger.Infof("Creating source snapstore from provider: %s", b.config.CopierConfig.SourceSnapstore.Provider)
+		sourceSnapStore, err := snapstore.GetSnapstore(b.config.CopierConfig.SourceSnapstore)
+		if err != nil {
+			return fmt.Errorf("failed to create source snapstore from configured storage provider: %v", err)
+		}
+
+		b.logger.Infof("Creating copier...")
+		cpr = copier.NewCopier(sourceSnapStore, ss, b.logger)
+	}
+
+	handler := b.startHTTPServer(etcdInitializer, ssr, ss)
 	defer handler.Stop()
 
 	ssrStopCh := make(chan struct{})
@@ -160,17 +173,17 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 
 	timer := time.NewTimer(30 * time.Second)
 	os := objectstore.NewObjectStore(ss, b.logger)
-	go b.handleOperationEvents(timer, os, handler)
+	go b.handleCopyOperationEvents(timer, os, handler)
 
 	go defragmentor.DefragDataPeriodically(ctx, b.config.EtcdConnectionConfig, b.defragmentationSchedule, ssr.TriggerFullSnapshot, b.logger)
 
-	b.runEtcdProbeLoopWithSnapshotter(ctx, os, handler, ssr, ssrStopCh, ackCh)
+	b.runEtcdProbeLoopWithSnapshotter(ctx, os, handler, ssr, cpr, ssrStopCh, ackCh)
 	return nil
 }
 
 // runEtcdProbeLoopWithSnapshotter runs the etcd probe loop
 // for the case where snapshotter is configured correctly
-func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, os objectstore.ObjectStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, ssrStopCh chan struct{}, ackCh chan struct{}) {
+func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, os objectstore.ObjectStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, cpr *copier.Copier, ssrStopCh chan struct{}, ackCh chan struct{}) {
 	var (
 		err                       error
 		initialDeltaSnapshotTaken bool
@@ -178,7 +191,7 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 
 	for {
 		if b.config.CopyBackups {
-			if err := b.handleCopyOption(); err != nil {
+			if err := cpr.HandleCopyOperation(); err != nil {
 				b.logger.Errorf("Copying backups failed: %v", err)
 				handler.SetStatus(http.StatusServiceUnavailable)
 				continue
@@ -204,7 +217,7 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		}
 
 		b.logger.Infof("Getting copy operation...")
-		obj, copyOp, err := b.getCopyOperation(os)
+		obj, copyOp, err := copier.GetCopyOperation(os)
 		if err != nil {
 			b.logger.Errorf("Failed to get copy operation: %v", err)
 			handler.SetStatus(http.StatusServiceUnavailable)
@@ -226,7 +239,7 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 					// Set copy operation status to Ready
 					b.logger.Infof("Setting copy operation status to Ready...")
 					copyOp.Status = objectstore.OperationStatusReady
-					if err := b.setCopyOperation(os, obj, copyOp); err != nil {
+					if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
 						b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
 						continue
 					}
@@ -395,137 +408,18 @@ func handleSsrStopRequest(ctx context.Context, handler *HTTPHandler, ssr *snapsh
 	}
 }
 
-func (b *BackupRestoreServer) handleOperationEvents(timer *time.Timer, os objectstore.ObjectStore, handler *HTTPHandler) {
+func (b *BackupRestoreServer) handleCopyOperationEvents(timer *time.Timer, os objectstore.ObjectStore, handler *HTTPHandler) {
 	for {
 		select {
 		case <-timer.C:
 			b.logger.Infof("Getting copy operation...")
-			if _, copyOp, _ := b.getCopyOperation(os); copyOp != nil {
+			if _, copyOp, _ := copier.GetCopyOperation(os); copyOp != nil {
 				b.logger.Infof("Copy operation found, stopping snapshotter...")
 				atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
 				handler.Logger.Info("Changing handler state...")
 				handler.ReqCh <- emptyStruct
 				handler.Logger.Info("Waiting for acknowledgment...")
 				<-handler.AckCh
-			}
-			timer.Reset(30 * time.Second)
-		}
-	}
-}
-
-func (b *BackupRestoreServer) getCopyOperation(os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
-	b.logger.Infof("Listing objects...")
-	objects, err := os.List()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if len(objects) == 0 {
-		return nil, nil, nil
-	}
-	if len(objects) > 1 {
-		return nil, nil, fmt.Errorf("multiple objects found")
-	}
-	if objects[0].Kind != objectstore.ObjectKindCopyOperation {
-		return nil, nil, fmt.Errorf("found object of kind different from CopyOperation")
-	}
-
-	b.logger.Infof("Reading object %v...", objects[0])
-	copyOp := &objectstore.CopyOperation{}
-	if err := os.Read(objects[0], copyOp); err != nil {
-		return nil, nil, err
-	}
-	return objects[0], copyOp, nil
-}
-
-func (b *BackupRestoreServer) setCopyOperation(os objectstore.ObjectStore, obj *objectstore.Object, copyOp *objectstore.CopyOperation) error {
-	b.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
-	if err := os.Write(obj, copyOp); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (b *BackupRestoreServer) handleCopyOption() error {
-	sourceSnapStore, destSnapStore, err := copier.GetSourceAndDestinationStores(b.config.CopierConfig, b.config.SnapstoreConfig)
-	if err != nil {
-		return fmt.Errorf("Could not get source and destintion snapstores: %v", err)
-	}
-	os := objectstore.NewObjectStore(sourceSnapStore, b.logger)
-	obj, copyOp, err := b.getCopyOperation(os)
-	if err != nil {
-		return fmt.Errorf("Failed to retrieve copy operation: %v", err)
-	}
-
-	if copyOp == nil {
-		obj, copyOp, err = b.initializeCopyOperation(os, objectstore.OperationStatusInitial)
-		if err != nil {
-			return fmt.Errorf("Failed to initialize copy operation: %v", err)
-		}
-		b.logger.Info("Successfully initialized copy operation")
-	}
-
-	if copyOp.Status == objectstore.OperationStatusDone {
-		b.logger.Info("Operation is already done, nothing to do")
-		return nil
-	}
-
-	if copyOp.Status == objectstore.OperationStatusInitial {
-		b.logger.Info("Waiting for copy operation to become Ready ...")
-		timer := time.NewTimer(30)
-		obj, copyOp, err = b.waitForReadyCopyOp(timer, os)
-		if err != nil {
-			return fmt.Errorf("Failed waiting for copy operation to become ready: %v", err)
-		}
-		b.logger.Info("Copy operation became ready")
-	}
-
-	b.logger.Info("Starting to copy backups ...")
-	backupCopier := copier.NewCopier(sourceSnapStore, destSnapStore, b.logger)
-	if err := backupCopier.Run(); err != nil {
-		return fmt.Errorf("Failed to copy backups: %v", err)
-	}
-	b.logger.Info("Successfully copied backups")
-
-	if obj, copyOp, err = b.updateCopyOperationStatus(os, obj, copyOp, objectstore.OperationStatusDone); err != nil {
-		return fmt.Errorf("Failed to set copy operation status to done: %v", err)
-	}
-	b.logger.Info("Successfully set copy operation to done")
-
-	return nil
-}
-
-func (b *BackupRestoreServer) initializeCopyOperation(os objectstore.ObjectStore, status objectstore.OperationStatus) (*objectstore.Object, *objectstore.CopyOperation, error) {
-	now := time.Now().UTC()
-	copyOp := &objectstore.CopyOperation{
-		Source:    true,
-		Owner:     "foo",
-		Initiated: now,
-		Status:    status,
-	}
-	obj := &objectstore.Object{
-		Kind:      objectstore.ObjectKindCopyOperation,
-		Name:      "test",
-		CreatedOn: now,
-	}
-	return obj, copyOp, b.setCopyOperation(os, obj, copyOp)
-}
-
-func (b *BackupRestoreServer) updateCopyOperationStatus(os objectstore.ObjectStore, obj *objectstore.Object, copyOp *objectstore.CopyOperation, status objectstore.OperationStatus) (*objectstore.Object, *objectstore.CopyOperation, error) {
-	copyOp.Status = status
-	return obj, copyOp, b.setCopyOperation(os, obj, copyOp)
-}
-
-func (b *BackupRestoreServer) waitForReadyCopyOp(timer *time.Timer, os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
-	for {
-		select {
-		case <-timer.C:
-			b.logger.Infof("Getting copy operation...")
-			if obj, copyOp, error := b.getCopyOperation(os); copyOp != nil {
-				b.logger.Infof("copy operation is %+v", copyOp)
-				if copyOp.Status == objectstore.OperationStatusReady {
-					return obj, copyOp, error
-				}
 			}
 			timer.Reset(30 * time.Second)
 		}

@@ -16,8 +16,10 @@ package copier
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 
 	"github.com/sirupsen/logrus"
@@ -26,12 +28,12 @@ import (
 func GetSourceAndDestinationStores(config *Config, destSnapStoreConfig *snapstore.Config) (snapstore.SnapStore, snapstore.SnapStore, error) {
 	sourceSnapStore, err := snapstore.GetSnapstore(config.SourceSnapstore)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Could not retrieve source snapstore: %v", err)
+		return nil, nil, fmt.Errorf("could not get source snapstore: %v", err)
 	}
 
 	destSnapStore, err := snapstore.GetSnapstore(destSnapStoreConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Could not retrieve destination snapstore: %v", err)
+		return nil, nil, fmt.Errorf("could not get destination snapstore: %v", err)
 	}
 
 	return sourceSnapStore, destSnapStore, nil
@@ -40,7 +42,7 @@ func GetSourceAndDestinationStores(config *Config, destSnapStoreConfig *snapstor
 // NewCopier returns a new copier
 func NewCopier(sourceSnapStore snapstore.SnapStore, snapStore snapstore.SnapStore, logger *logrus.Entry) *Copier {
 	return &Copier{
-		logger:          logger.WithField("actor", "snapshotter"),
+		logger:          logger.WithField("actor", "copier"),
 		sourceSnapStore: sourceSnapStore,
 		snapStore:       snapStore,
 	}
@@ -50,32 +52,145 @@ func NewCopier(sourceSnapStore snapstore.SnapStore, snapStore snapstore.SnapStor
 func (c *Copier) Run() error {
 	backups, err := miscellaneous.GetAllBackups(c.sourceSnapStore)
 	if err != nil {
-		return fmt.Errorf("failed to get latest snapshot: %v", err)
+		return fmt.Errorf("failed to get backups from source: %v", err)
 	}
 	if backups == nil {
-		return fmt.Errorf("No snapshot found. Will do nothing.")
+		return fmt.Errorf("no snapshots found, will do nothing")
 	}
 
 	for _, backup := range backups {
 		rc, err := c.sourceSnapStore.Fetch(*backup.FullSnapshot)
 		if err != nil {
-			return fmt.Errorf("failed to get readerCloser form baseSnapshot")
+			return fmt.Errorf("failed to fetch full snapshot from source: %v", err)
 		}
 
 		if err := c.snapStore.Save(*backup.FullSnapshot, rc); err != nil {
-			return fmt.Errorf("failed to save snapshot to destination")
+			return fmt.Errorf("failed to save full snapshot to destination: %v", err)
 		}
 
 		for _, deltaSnap := range backup.DeltaSnapshotList {
 			rc, err := c.sourceSnapStore.Fetch(*deltaSnap)
 			if err != nil {
-				return fmt.Errorf("failed to get readerCloser form baseSnapshot")
+				return fmt.Errorf("failed to fetch delta snapshot from source: %v", err)
 			}
 
 			if err := c.snapStore.Save(*deltaSnap, rc); err != nil {
-				return fmt.Errorf("failed to save snapshot to destination")
+				return fmt.Errorf("failed to save delta snapshot to destination: %v", err)
 			}
 		}
+	}
+	return nil
+}
+
+func (c *Copier) HandleCopyOperation() error {
+	os := objectstore.NewObjectStore(c.sourceSnapStore, c.logger)
+
+	obj, copyOp, err := GetCopyOperation(os)
+	if err != nil {
+		return fmt.Errorf("could not get copy operation: %v", err)
+	}
+
+	if copyOp == nil {
+		c.logger.Info("Initializing copy operation...")
+		obj, copyOp = InitializeCopyOperation()
+		if err := SetCopyOperation(os, obj, copyOp); err != nil {
+			return fmt.Errorf("could not set copy operation: %v", err)
+		}
+		c.logger.Info("Copy operation initialized")
+	}
+
+	if copyOp.Status == objectstore.OperationStatusDone {
+		c.logger.Info("Operation is already Done, nothing to do")
+		return nil
+	}
+
+	if copyOp.Status == objectstore.OperationStatusInitial {
+		c.logger.Info("Waiting for copy operation to become Ready...")
+		timer := time.NewTimer(30)
+		obj, copyOp, err = c.waitForCopyOperationReady(timer, os)
+		if err != nil {
+			return fmt.Errorf("could not wait for copy operation to become ready: %v", err)
+		}
+		c.logger.Info("Copy operation became Ready")
+	}
+
+	c.logger.Info("Copying backups ...")
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("could not copy backups: %v", err)
+	}
+	c.logger.Info("Backups copied")
+
+	c.logger.Info("Setting copy operation status to Done...")
+	copyOp.Status = objectstore.OperationStatusDone
+	if err := SetCopyOperation(os, obj, copyOp); err != nil {
+		return fmt.Errorf("could not set copy operation: %v", err)
+	}
+	c.logger.Info("Copy operation status set to Done")
+
+	return nil
+}
+
+func (c *Copier) waitForCopyOperationReady(timer *time.Timer, os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
+	for {
+		select {
+		case <-timer.C:
+			c.logger.Infof("Getting copy operation...")
+			var obj *objectstore.Object
+			var copyOp *objectstore.CopyOperation
+			var err error
+			if obj, copyOp, err = GetCopyOperation(os); err != nil {
+				return nil, nil, err
+			}
+			if copyOp != nil && copyOp.Status == objectstore.OperationStatusReady {
+				return obj, copyOp, nil
+			}
+			timer.Reset(30 * time.Second)
+		}
+	}
+}
+
+func InitializeCopyOperation() (*objectstore.Object, *objectstore.CopyOperation) {
+	now := time.Now().UTC()
+	copyOp := &objectstore.CopyOperation{
+		Source:    true,
+		Owner:     "foo",
+		Initiated: now,
+		Status:    objectstore.OperationStatusInitial,
+	}
+	obj := &objectstore.Object{
+		Kind:      objectstore.ObjectKindCopyOperation,
+		Name:      "test",
+		CreatedOn: now,
+	}
+	return obj, copyOp
+}
+
+func GetCopyOperation(os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
+	objects, err := os.List()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(objects) == 0 {
+		return nil, nil, nil
+	}
+	if len(objects) > 1 {
+		return nil, nil, fmt.Errorf("multiple objects found")
+	}
+	if objects[0].Kind != objectstore.ObjectKindCopyOperation {
+		return nil, nil, fmt.Errorf("found object of kind different from CopyOperation")
+	}
+
+	copyOp := &objectstore.CopyOperation{}
+	if err := os.Read(objects[0], copyOp); err != nil {
+		return nil, nil, err
+	}
+	return objects[0], copyOp, nil
+}
+
+func SetCopyOperation(os objectstore.ObjectStore, obj *objectstore.Object, copyOp *objectstore.CopyOperation) error {
+	if err := os.Write(obj, copyOp); err != nil {
+		return err
 	}
 	return nil
 }

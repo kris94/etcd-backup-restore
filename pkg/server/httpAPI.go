@@ -25,7 +25,11 @@ import (
 
 	"github.com/gardener/etcd-backup-restore/pkg/initializer"
 	"github.com/gardener/etcd-backup-restore/pkg/initializer/validator"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
+	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 )
@@ -61,6 +65,7 @@ const (
 type HTTPHandler struct {
 	Initializer               initializer.Initializer
 	Snapshotter               *snapshotter.Snapshotter
+	Store                     snapstore.SnapStore
 	Port                      uint
 	server                    *http.Server
 	Logger                    *logrus.Entry
@@ -103,6 +108,7 @@ func (h *HTTPHandler) RegisterHandler() {
 	mux.HandleFunc("/snapshot/full", h.serveFullSnapshotTrigger)
 	mux.HandleFunc("/snapshot/delta", h.serveDeltaSnapshotTrigger)
 	mux.HandleFunc("/snapshot/latest", h.serveLatestSnapshotMetadata)
+	mux.HandleFunc("/object/copyop", h.serveCopyOperationTrigger)
 	mux.HandleFunc("/healthz", h.serveHealthz)
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -307,6 +313,46 @@ func (h *HTTPHandler) serveLatestSnapshotMetadata(rw http.ResponseWriter, req *h
 	json, err := json.Marshal(resp)
 	if err != nil {
 		h.Logger.Warnf("Unable to marshal latest snapshot metadata response to json: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+	if h.Snapshotter == nil {
+		h.Logger.Warnf("Ignoring latest snapshot metadata request as snapshotter is not configured")
+		rw.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+	obj, copyOp, err := copier.GetCopyOperation(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get copy operation: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if copyOp != nil {
+		h.Logger.Warnf("Copy operation already exists")
+		rw.WriteHeader(http.StatusConflict)
+		return
+	}
+
+	obj, copyOp = copier.InitializeCopyOperation()
+	if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+		h.Logger.Warnf("Could not initialize copy operation: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	json, err := json.Marshal(copyOp)
+	if err != nil {
+		h.Logger.Warnf("Unable to marshal copy operation to json: %v", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
