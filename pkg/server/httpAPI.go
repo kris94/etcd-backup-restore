@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/initializer"
 	"github.com/gardener/etcd-backup-restore/pkg/initializer/validator"
@@ -323,13 +324,9 @@ func (h *HTTPHandler) serveLatestSnapshotMetadata(rw http.ResponseWriter, req *h
 
 func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *http.Request) {
 	h.checkAndSetSecurityHeaders(rw)
-	if h.Snapshotter == nil {
-		h.Logger.Warnf("Ignoring latest snapshot metadata request as snapshotter is not configured")
-		rw.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 
 	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
 	obj, copyOp, err := copier.GetCopyOperation(os)
 	if err != nil {
 		h.Logger.Warnf("Could not get copy operation: %v", err)
@@ -337,17 +334,26 @@ func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *htt
 		return
 	}
 
-	if copyOp != nil {
-		h.Logger.Warnf("Copy operation already exists")
-		rw.WriteHeader(http.StatusConflict)
-		return
+	if copyOp == nil {
+		h.Logger.Info("Initiating copy operation...")
+		obj, copyOp = copier.InitializeCopyOperation()
+		if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+			h.Logger.Warnf("Could not set copy operation: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Copy operation initiated")
 	}
 
-	obj, copyOp = copier.InitializeCopyOperation()
-	if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
-		h.Logger.Warnf("Could not initialize copy operation: %v", err)
-		rw.WriteHeader(http.StatusInternalServerError)
-		return
+	if copyOp.Status == objectstore.OperationStatusInitial {
+		h.Logger.Info("Waiting for copy operation to become Ready...")
+		obj, copyOp, err = copier.WaitForCopyOperationReady(time.NewTimer(15*time.Second), os)
+		if err != nil {
+			h.Logger.Warnf("Could not wait for copy operation to become Ready: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Copy operation became Ready")
 	}
 
 	json, err := json.Marshal(copyOp)
@@ -356,6 +362,7 @@ func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *htt
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
 	rw.WriteHeader(http.StatusOK)
 	rw.Write(json)
 	return
