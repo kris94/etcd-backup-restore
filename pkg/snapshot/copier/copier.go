@@ -91,12 +91,12 @@ func (c *Copier) HandleCopyOperation() error {
 	}
 
 	if copyOp == nil {
-		c.logger.Info("Initializing copy operation...")
+		c.logger.Info("Initiating copy operation...")
 		obj, copyOp = InitializeCopyOperation()
 		if err := SetCopyOperation(os, obj, copyOp); err != nil {
 			return fmt.Errorf("could not set copy operation: %v", err)
 		}
-		c.logger.Info("Copy operation initialized")
+		c.logger.Info("Copy operation initiated")
 	}
 
 	if copyOp.Status == objectstore.OperationStatusDone {
@@ -106,10 +106,9 @@ func (c *Copier) HandleCopyOperation() error {
 
 	if copyOp.Status == objectstore.OperationStatusInitial {
 		c.logger.Info("Waiting for copy operation to become Ready...")
-		timer := time.NewTimer(30)
-		obj, copyOp, err = c.waitForCopyOperationReady(timer, os)
+		obj, copyOp, err = WaitForCopyOperationReady(time.NewTimer(15*time.Second), os)
 		if err != nil {
-			return fmt.Errorf("could not wait for copy operation to become ready: %v", err)
+			return fmt.Errorf("could not wait for copy operation to become Ready: %v", err)
 		}
 		c.logger.Info("Copy operation became Ready")
 	}
@@ -130,11 +129,10 @@ func (c *Copier) HandleCopyOperation() error {
 	return nil
 }
 
-func (c *Copier) waitForCopyOperationReady(timer *time.Timer, os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
+func WaitForCopyOperationReady(timer *time.Timer, os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
 	for {
 		select {
 		case <-timer.C:
-			c.logger.Infof("Getting copy operation...")
 			var obj *objectstore.Object
 			var copyOp *objectstore.CopyOperation
 			var err error
@@ -144,7 +142,7 @@ func (c *Copier) waitForCopyOperationReady(timer *time.Timer, os objectstore.Obj
 			if copyOp != nil && copyOp.Status == objectstore.OperationStatusReady {
 				return obj, copyOp, nil
 			}
-			timer.Reset(30 * time.Second)
+			timer.Reset(15 * time.Second)
 		}
 	}
 }
