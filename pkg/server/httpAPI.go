@@ -109,7 +109,8 @@ func (h *HTTPHandler) RegisterHandler() {
 	mux.HandleFunc("/snapshot/full", h.serveFullSnapshotTrigger)
 	mux.HandleFunc("/snapshot/delta", h.serveDeltaSnapshotTrigger)
 	mux.HandleFunc("/snapshot/latest", h.serveLatestSnapshotMetadata)
-	mux.HandleFunc("/object/copyop", h.serveCopyOperationTrigger)
+	mux.HandleFunc("/copyop/initiate", h.serveCopyOperationInitiate)
+	mux.HandleFunc("/copyop/status", h.serveCopyOperationStatus)
 	mux.HandleFunc("/healthz", h.serveHealthz)
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -322,7 +323,7 @@ func (h *HTTPHandler) serveLatestSnapshotMetadata(rw http.ResponseWriter, req *h
 	return
 }
 
-func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *http.Request) {
+func (h *HTTPHandler) serveCopyOperationInitiate(rw http.ResponseWriter, req *http.Request) {
 	h.checkAndSetSecurityHeaders(rw)
 
 	os := objectstore.NewObjectStore(h.Store, h.Logger)
@@ -354,6 +355,30 @@ func (h *HTTPHandler) serveCopyOperationTrigger(rw http.ResponseWriter, req *htt
 			return
 		}
 		h.Logger.Info("Copy operation became Ready")
+	}
+
+	json, err := json.Marshal(copyOp)
+	if err != nil {
+		h.Logger.Warnf("Unable to marshal copy operation to json: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveCopyOperationStatus(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
+	_, copyOp, err := copier.GetCopyOperation(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get copy operation: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	json, err := json.Marshal(copyOp)
