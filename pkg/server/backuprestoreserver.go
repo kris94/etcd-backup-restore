@@ -226,9 +226,8 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		if copyOp != nil {
 			if copyOp.Source {
 				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as source", copyOp.Owner, copyOp.Status, copyOp.Initiated)
+				handler.SetStatus(http.StatusServiceUnavailable)
 				if copyOp.Status == objectstore.OperationStatusInitial {
-					handler.SetStatus(http.StatusServiceUnavailable)
-
 					// Take the final full snapshot
 					b.logger.Infof("Taking final full snapshot...")
 					if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
@@ -244,14 +243,12 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 						continue
 					}
 				}
-				b.logger.Infof("Shutting down...")
-				return
 			} else {
 				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as destination", copyOp.Owner, copyOp.Status, copyOp.Initiated)
-				b.logger.Infof("Sleeping for 30 seconds...")
-				time.Sleep(30 * time.Second)
-				continue
 			}
+			b.logger.Infof("Sleeping for 30 seconds...")
+			time.Sleep(30 * time.Second)
+			continue
 		}
 
 		// The decision to either take an initial delta snapshot or
