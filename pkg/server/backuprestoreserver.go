@@ -18,14 +18,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/errors"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
 	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
-
 	"github.com/prometheus/client_golang/prometheus"
+	cron "github.com/robfig/cron/v3"
+	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/pkg/types"
 
 	"github.com/gardener/etcd-backup-restore/pkg/defragmentor"
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
@@ -34,9 +38,6 @@ import (
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/restorer"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
-	cron "github.com/robfig/cron/v3"
-	"github.com/sirupsen/logrus"
-	"go.etcd.io/etcd/pkg/types"
 )
 
 // BackupRestoreServer holds the details for backup-restore server.
@@ -227,11 +228,18 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			if copyOp.Source {
 				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as source", copyOp.Owner, copyOp.Status, copyOp.Initiated)
 				handler.SetStatus(http.StatusServiceUnavailable)
+
 				if copyOp.Status == objectstore.OperationStatusInitial {
 					// Take the final full snapshot
 					b.logger.Infof("Taking final full snapshot...")
 					if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
 						b.logger.Errorf("Failed to take final full snapshot: %v", err)
+						continue
+					}
+
+					// Kill etcd process
+					if err := b.killEtcdProcess(); err != nil {
+						b.logger.Errorf("Failed to kill etcd process: %v", err)
 						continue
 					}
 
@@ -242,12 +250,18 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 						b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
 						continue
 					}
+				} else {
+					// Kill etcd process
+					if err := b.killEtcdProcess(); err != nil {
+						b.logger.Errorf("Failed to kill etcd process: %v", err)
+						continue
+					}
 				}
 			} else {
 				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as destination", copyOp.Owner, copyOp.Status, copyOp.Initiated)
+				b.logger.Infof("Sleeping for 30 seconds...")
+				time.Sleep(30 * time.Second)
 			}
-			b.logger.Infof("Sleeping for 30 seconds...")
-			time.Sleep(30 * time.Second)
 			continue
 		}
 
@@ -421,4 +435,23 @@ func (b *BackupRestoreServer) handleCopyOperationEvents(timer *time.Timer, os ob
 			timer.Reset(30 * time.Second)
 		}
 	}
+}
+
+func (b *BackupRestoreServer) killEtcdProcess() error {
+	// Check if etcd process exists
+	out, err := exec.Command("sh", "-c", "ps ax | grep \"etcd --config-file\" | grep -v grep | awk '{print $1}' | { grep -Eo '[0-9]{1,}' || true; }").Output()
+	if err != nil {
+		return fmt.Errorf("could not determine etcd process PID: %v", err)
+	}
+	pid := strings.TrimSpace(string(out))
+
+	// If etcd process exists, kill it
+	if pid != "" {
+		b.logger.Infof("Killing etcd process with PID %s...", pid)
+		if err := exec.Command("sh", "-c", fmt.Sprintf("kill -9 %s", pid)).Run(); err != nil {
+			return fmt.Errorf("could not kill etcd process with PID %s: %v", pid, err)
+		}
+	}
+
+	return nil
 }
