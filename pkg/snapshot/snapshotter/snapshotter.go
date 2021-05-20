@@ -509,12 +509,10 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 	for {
 		select {
 		case <-ssr.fullSnapshotReqCh:
-			// TODO Testing only, remove
-			err := ssr.writeCopyOperation(true)
-			//s, err := ssr.TakeFullSnapshotAndResetTimer()
+			s, err := ssr.TakeFullSnapshotAndResetTimer()
 			res := result{
-				//Snapshot: s,
-				Err: err,
+				Snapshot: s,
+				Err:      err,
 			}
 			ssr.fullSnapshotAckCh <- res
 			if err != nil {
@@ -522,12 +520,10 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.deltaSnapshotReqCh:
-			// TODO Testing only, remove
-			err := ssr.writeCopyOperation(false)
-			//s, err := ssr.takeDeltaSnapshotAndResetTimer()
+			s, err := ssr.takeDeltaSnapshotAndResetTimer()
 			res := result{
-				//Snapshot: s,
-				Err: err,
+				Snapshot: s,
+				Err:      err,
 			}
 			ssr.deltaSnapshotAckCh <- res
 			if err != nil {
