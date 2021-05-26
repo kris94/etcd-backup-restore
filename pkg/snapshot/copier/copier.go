@@ -20,6 +20,7 @@ import (
 
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
 	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 
 	"github.com/sirupsen/logrus"
@@ -150,7 +151,7 @@ func WaitForCopyOperationReady(timer *time.Timer, os objectstore.ObjectStore) (*
 func InitializeCopyOperation() (*objectstore.Object, *objectstore.CopyOperation) {
 	now := time.Now().UTC()
 	copyOp := &objectstore.CopyOperation{
-		Status:    objectstore.OperationStatusInitial,
+		Status: objectstore.OperationStatusInitial,
 	}
 	obj := &objectstore.Object{
 		Kind:      objectstore.ObjectKindCopyOperation,
@@ -161,29 +162,43 @@ func InitializeCopyOperation() (*objectstore.Object, *objectstore.CopyOperation)
 }
 
 func GetCopyOperation(os objectstore.ObjectStore) (*objectstore.Object, *objectstore.CopyOperation, error) {
+	// If there is a blocker, fail
+	_, blocker, err := snapshotter.GetBlocker(os)
+	if err != nil {
+		return nil, nil, err
+	}
+	if blocker != nil {
+		return nil, nil, fmt.Errorf("blocker found, failing GetCopyOperation")
+	}
+
 	objects, err := os.List()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if len(objects) == 0 {
-		return nil, nil, nil
-	}
-	if len(objects) > 1 {
-		return nil, nil, fmt.Errorf("multiple objects found")
-	}
-	if objects[0].Kind != objectstore.ObjectKindCopyOperation {
-		return nil, nil, fmt.Errorf("found object of kind different from CopyOperation")
+	for _, object := range objects {
+		if object.Kind == objectstore.ObjectKindCopyOperation {
+			copyOp := &objectstore.CopyOperation{}
+			if err := os.Read(object, copyOp); err != nil {
+				return nil, nil, err
+			}
+			return object, copyOp, nil
+		}
 	}
 
-	copyOp := &objectstore.CopyOperation{}
-	if err := os.Read(objects[0], copyOp); err != nil {
-		return nil, nil, err
-	}
-	return objects[0], copyOp, nil
+	return nil, nil, nil
 }
 
 func SetCopyOperation(os objectstore.ObjectStore, obj *objectstore.Object, copyOp *objectstore.CopyOperation) error {
+	// If there is a blocker, fail
+	_, blocker, err := snapshotter.GetBlocker(os)
+	if err != nil {
+		return err
+	}
+	if blocker != nil {
+		return fmt.Errorf("blocker found, failing SetCopyOperation")
+	}
+
 	if err := os.Write(obj, copyOp); err != nil {
 		return err
 	}

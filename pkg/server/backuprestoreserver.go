@@ -419,8 +419,13 @@ func (b *BackupRestoreServer) handleCopyOperationEvents(timer *time.Timer, os ob
 		select {
 		case <-timer.C:
 			b.logger.Infof("Getting copy operation...")
-			if _, copyOp, _ := copier.GetCopyOperation(os); copyOp != nil {
-				b.logger.Infof("Copy operation found, stopping snapshotter...")
+			if _, copyOp, err := copier.GetCopyOperation(os); err != nil || copyOp != nil {
+				if err != nil {
+					b.logger.Infof("Could not get copy operation: %v", err)
+				} else {
+					b.logger.Infof("Copy operation found")
+				}
+				b.logger.Infof("Stopping snapshotter...")
 				atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
 				handler.Logger.Info("Changing handler state...")
 				handler.ReqCh <- emptyStruct

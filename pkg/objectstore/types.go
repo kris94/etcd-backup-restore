@@ -33,6 +33,7 @@ type ObjectKind string
 
 const (
 	ObjectKindCopyOperation ObjectKind = "CopyOperation"
+	ObjectKindBlocker       ObjectKind = "Blocker"
 )
 
 type Object struct {
@@ -54,3 +55,5 @@ const (
 type CopyOperation struct {
 	Status OperationStatus `json:"status"`
 }
+
+type Blocker struct{}

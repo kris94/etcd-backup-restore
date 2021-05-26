@@ -111,6 +111,8 @@ func (h *HTTPHandler) RegisterHandler() {
 	mux.HandleFunc("/snapshot/latest", h.serveLatestSnapshotMetadata)
 	mux.HandleFunc("/copyop/initiate", h.serveCopyOperationInitiate)
 	mux.HandleFunc("/copyop/status", h.serveCopyOperationStatus)
+	mux.HandleFunc("/blocker/create", h.serveBlockerCreate)
+	mux.HandleFunc("/blocker/delete", h.serveBlockerDelete)
 	mux.HandleFunc("/healthz", h.serveHealthz)
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -390,5 +392,66 @@ func (h *HTTPHandler) serveCopyOperationStatus(rw http.ResponseWriter, req *http
 
 	rw.WriteHeader(http.StatusOK)
 	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveBlockerCreate(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
+	obj, blocker, err := snapshotter.GetBlocker(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get blocker: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if blocker == nil {
+		h.Logger.Info("Creating blocker...")
+		obj, blocker = snapshotter.InitializeBlocker()
+		if err := snapshotter.SetBlocker(os, obj, blocker); err != nil {
+			h.Logger.Warnf("Could not set blocker: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Blocker created")
+	}
+
+	json, err := json.Marshal(blocker)
+	if err != nil {
+		h.Logger.Warnf("Unable to marshal blocker to json: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveBlockerDelete(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
+	obj, blocker, err := snapshotter.GetBlocker(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get blocker: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if blocker != nil {
+		h.Logger.Info("Deleting blocker...")
+		if err := snapshotter.DeleteBlocker(os, obj); err != nil {
+			h.Logger.Warnf("Could not delete blocker: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Blocker deleted")
+	}
+
+	rw.WriteHeader(http.StatusOK)
 	return
 }

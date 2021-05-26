@@ -35,6 +35,7 @@ import (
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 )
 
@@ -193,6 +194,16 @@ func (ssr *Snapshotter) closeEtcdClient() {
 // TakeFullSnapshotAndResetTimer takes a full snapshot and resets the full snapshot
 // timer as per the schedule.
 func (ssr *Snapshotter) TakeFullSnapshotAndResetTimer() (*snapstore.Snapshot, error) {
+	// If there is a blocker, fail
+	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
+	_, blocker, err := GetBlocker(os)
+	if err != nil {
+		return nil, err
+	}
+	if blocker != nil {
+		return nil, fmt.Errorf("blocker found, failing TakeFullSnapshotAndResetTimer")
+	}
+
 	ssr.logger.Infof("Taking scheduled snapshot for time: %s", time.Now().Local())
 	s, err := ssr.takeFullSnapshot()
 	if err != nil {
@@ -337,6 +348,16 @@ func (ssr *Snapshotter) takeDeltaSnapshotAndResetTimer() (*snapstore.Snapshot, e
 // TakeDeltaSnapshot takes a delta snapshot that contains
 // the etcd events collected up till now
 func (ssr *Snapshotter) TakeDeltaSnapshot() (*snapstore.Snapshot, error) {
+	// If there is a blocker, fail
+	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
+	_, blocker, err := GetBlocker(os)
+	if err != nil {
+		return nil, err
+	}
+	if blocker != nil {
+		return nil, fmt.Errorf("blocker found, failing TakeDeltaSnapshot")
+	}
+
 	defer ssr.cleanupInMemoryEvents()
 	ssr.logger.Infof("Taking delta snapshot for time: %s", time.Now().Local())
 
@@ -578,3 +599,46 @@ func (ssr *Snapshotter) resetFullSnapshotTimer() error {
 	return nil
 }
 
+func InitializeBlocker() (*objectstore.Object, *objectstore.Blocker) {
+	now := time.Now().UTC()
+	blocker := &objectstore.Blocker{}
+	obj := &objectstore.Object{
+		Kind:      objectstore.ObjectKindBlocker,
+		Name:      "test",
+		CreatedOn: now,
+	}
+	return obj, blocker
+}
+
+func GetBlocker(os objectstore.ObjectStore) (*objectstore.Object, *objectstore.Blocker, error) {
+	objects, err := os.List()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, object := range objects {
+		if object.Kind == objectstore.ObjectKindBlocker {
+			blocker := &objectstore.Blocker{}
+			if err := os.Read(object, blocker); err != nil {
+				return nil, nil, err
+			}
+			return object, blocker, nil
+		}
+	}
+
+	return nil, nil, nil
+}
+
+func SetBlocker(os objectstore.ObjectStore, obj *objectstore.Object, blocker *objectstore.Blocker) error {
+	if err := os.Write(obj, blocker); err != nil {
+		return err
+	}
+	return nil
+}
+
+func DeleteBlocker(os objectstore.ObjectStore, obj *objectstore.Object) error {
+	if err := os.Delete(obj); err != nil {
+		return err
+	}
+	return nil
+}
