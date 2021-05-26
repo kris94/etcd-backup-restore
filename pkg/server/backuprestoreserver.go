@@ -225,43 +225,28 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			continue
 		}
 		if copyOp != nil {
-			if copyOp.Source {
-				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as source", copyOp.Owner, copyOp.Status, copyOp.Initiated)
-				handler.SetStatus(http.StatusServiceUnavailable)
+			b.logger.Infof("Found copy operation with status %s", copyOp.Status)
+			handler.SetStatus(http.StatusServiceUnavailable)
 
-				if copyOp.Status == objectstore.OperationStatusInitial {
-					// Take the final full snapshot
-					b.logger.Infof("Taking final full snapshot...")
-					if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
-						b.logger.Errorf("Failed to take final full snapshot: %v", err)
-						continue
-					}
-
-					// Kill etcd process
-					if err := b.killEtcdProcess(); err != nil {
-						b.logger.Errorf("Failed to kill etcd process: %v", err)
-						continue
-					}
-
-					// Set copy operation status to Ready
-					b.logger.Infof("Setting copy operation status to Ready...")
-					copyOp.Status = objectstore.OperationStatusReady
-					if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
-						b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
-						continue
-					}
-				} else {
-					// Kill etcd process
-					if err := b.killEtcdProcess(); err != nil {
-						b.logger.Errorf("Failed to kill etcd process: %v", err)
-						continue
-					}
+			if copyOp.Status == objectstore.OperationStatusInitial {
+				// Take the final full snapshot
+				b.logger.Infof("Taking final full snapshot...")
+				if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
+					b.logger.Errorf("Failed to take final full snapshot: %v", err)
+					continue
 				}
-			} else {
-				b.logger.Infof("Copy operation with owner %s and status %s initiated at %s as destination", copyOp.Owner, copyOp.Status, copyOp.Initiated)
-				b.logger.Infof("Sleeping for 30 seconds...")
-				time.Sleep(30 * time.Second)
+
+				// Set copy operation status to Ready
+				b.logger.Infof("Setting copy operation status to Ready...")
+				copyOp.Status = objectstore.OperationStatusReady
+				if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+					b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
+					continue
+				}
 			}
+
+			b.logger.Infof("Sleeping for 30 seconds...")
+			time.Sleep(30 * time.Second)
 			continue
 		}
 
@@ -330,6 +315,11 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			if etcdErr, ok := err.(*errors.EtcdError); ok == true {
 				b.logger.Errorf("Snapshotter failed with etcd error: %v", etcdErr)
 			} else {
+				// Kill the etcd process to ensure that any open connections from kube-apiserver are terminated
+				if err := b.killEtcdProcess(); err != nil {
+					b.logger.Errorf("Failed to kill etcd process: %v", err)
+				}
+
 				b.logger.Fatalf("Snapshotter failed with error: %v", err)
 			}
 		}
@@ -337,6 +327,11 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		ackCh <- emptyStruct
 		handler.SetStatus(http.StatusServiceUnavailable)
 		close(gcStopCh)
+
+		// Kill the etcd process to ensure that any open connections from kube-apiserver are terminated
+		if err := b.killEtcdProcess(); err != nil {
+			b.logger.Errorf("Failed to kill etcd process: %v", err)
+		}
 	}
 }
 
@@ -445,12 +440,16 @@ func (b *BackupRestoreServer) killEtcdProcess() error {
 	}
 	pid := strings.TrimSpace(string(out))
 
-	// If etcd process exists, kill it
-	if pid != "" {
-		b.logger.Infof("Killing etcd process with PID %s...", pid)
-		if err := exec.Command("sh", "-c", fmt.Sprintf("kill -9 %s", pid)).Run(); err != nil {
-			return fmt.Errorf("could not kill etcd process with PID %s: %v", pid, err)
-		}
+	// If the etcd process doesn't exist, do nothing
+	if pid == "" {
+		b.logger.Infof("etcd process not found")
+		return nil
+	}
+
+	// If etcd process exists, kill it (with SIGTERM, to allow it to terminate gracefully)
+	b.logger.Infof("Killing etcd process with PID %s...", pid)
+	if err := exec.Command("sh", "-c", fmt.Sprintf("kill %s", pid)).Run(); err != nil {
+		return fmt.Errorf("could not kill etcd process with PID %s: %v", pid, err)
 	}
 
 	return nil

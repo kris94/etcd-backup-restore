@@ -150,9 +150,6 @@ func WaitForCopyOperationReady(timer *time.Timer, os objectstore.ObjectStore) (*
 func InitializeCopyOperation() (*objectstore.Object, *objectstore.CopyOperation) {
 	now := time.Now().UTC()
 	copyOp := &objectstore.CopyOperation{
-		Source:    true,
-		Owner:     "foo",
-		Initiated: now,
 		Status:    objectstore.OperationStatusInitial,
 	}
 	obj := &objectstore.Object{

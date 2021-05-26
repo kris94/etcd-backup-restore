@@ -25,17 +25,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	cron "github.com/robfig/cron/v3"
+	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/clientv3"
+
 	"github.com/gardener/etcd-backup-restore/pkg/compressor"
 	"github.com/gardener/etcd-backup-restore/pkg/errors"
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
-	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
-	"github.com/prometheus/client_golang/prometheus"
-	cron "github.com/robfig/cron/v3"
-	"github.com/sirupsen/logrus"
-	"go.etcd.io/etcd/clientv3"
 )
 
 // NewSnapshotter returns the snapshotter object.
@@ -578,26 +578,3 @@ func (ssr *Snapshotter) resetFullSnapshotTimer() error {
 	return nil
 }
 
-// TODO Testing only, remove
-func (ssr *Snapshotter) writeCopyOperation(source bool) error {
-	os := objectstore.NewObjectStore(ssr.store, ssr.logger)
-
-	now := time.Now()
-	obj := &objectstore.Object{
-		Kind:      objectstore.ObjectKindCopyOperation,
-		Name:      "test",
-		CreatedOn: now,
-	}
-	copyOp := &objectstore.CopyOperation{
-		Source:    source,
-		Owner:     "foo",
-		Initiated: now,
-		Status:    objectstore.OperationStatusInitial,
-	}
-	ssr.logger.Infof("Writing object %v with contents %v...", obj, copyOp)
-	if err := os.Write(obj, copyOp); err != nil {
-		return err
-	}
-
-	return nil
-}
