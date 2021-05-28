@@ -52,8 +52,5 @@ const (
 )
 
 type CopyOperation struct {
-	Source    bool            `json:"source"`
-	Owner     string          `json:"owner"`
-	Initiated time.Time       `json:"initiated"`
-	Status    OperationStatus `json:"status"`
+	Status OperationStatus `json:"status"`
 }
