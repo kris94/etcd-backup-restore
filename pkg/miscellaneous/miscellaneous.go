@@ -40,7 +40,7 @@ func GetLatestFullSnapshotAndDeltaSnapList(store brtypes.SnapStore) (*brtypes.Sn
 	}
 
 	for index := len(snapList); index > 0; index-- {
-		if snapList[index-1].IsChunk {
+		if snapList[index-1].IsChunk || snapList[index-1].Kind == brtypes.SnapshotKindObject {
 			continue
 		}
 		if snapList[index-1].Kind == brtypes.SnapshotKindFull {
@@ -59,6 +59,42 @@ func GetLatestFullSnapshotAndDeltaSnapList(store brtypes.SnapStore) (*brtypes.Sn
 		metrics.SnapstoreLatestDeltasRevisionsTotal.With(prometheus.Labels{}).Set(float64(revisionDiff))
 	}
 	return fullSnapshot, deltaSnapList, nil
+}
+
+// Backup contains a full snapshot and all of its delta snapshots.
+type Backup struct {
+	FullSnapshot      *brtypes.Snapshot
+	DeltaSnapshotList brtypes.SnapList
+}
+
+// GetAllBackups returns all backups (full snapshots and all their delta snapshots).
+func GetAllBackups(store brtypes.SnapStore) ([]Backup, error) {
+	var backups []Backup
+
+	snapList, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	backup := Backup{}
+	for i := len(snapList) - 1; i >= 0; i-- {
+		if snapList[i].IsChunk || snapList[i].Kind == brtypes.SnapshotKindObject {
+			continue
+		}
+		if snapList[i].Kind == brtypes.SnapshotKindFull {
+			backup.FullSnapshot = snapList[i]
+			backups = append(backups, backup)
+			backup = Backup{}
+			continue
+		}
+		backup.DeltaSnapshotList = append(backup.DeltaSnapshotList, snapList[i])
+	}
+
+	for _, backup := range backups {
+		sort.Sort(backup.DeltaSnapshotList)
+	}
+
+	return backups, nil
 }
 
 // StartEmbeddedEtcd starts the embedded etcd server.

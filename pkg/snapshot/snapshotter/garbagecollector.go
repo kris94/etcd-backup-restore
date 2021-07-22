@@ -185,7 +185,8 @@ func getSnapStreamIndexList(snapList brtypes.SnapList) []int {
 func garbageCollectChunks(store brtypes.SnapStore, snapList brtypes.SnapList, low, high int) {
 	for index := low; index < high; index++ {
 		snap := snapList[index]
-		if snap.Kind == brtypes.SnapshotKindDelta {
+		// Only delete chunk snapshots of kind Full or Object
+		if (snap.Kind != brtypes.SnapshotKindFull && snap.Kind != brtypes.SnapshotKindObject) || !snap.IsChunk {
 			continue
 		}
 		snapPath := path.Join(snap.SnapDir, snap.SnapName)

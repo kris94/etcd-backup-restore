@@ -22,10 +22,15 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/initializer"
 	"github.com/gardener/etcd-backup-restore/pkg/initializer/validator"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
+	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 )
@@ -61,6 +66,7 @@ const (
 type HTTPHandler struct {
 	Initializer               initializer.Initializer
 	Snapshotter               *snapshotter.Snapshotter
+	Store                     brtypes.SnapStore
 	Port                      uint
 	server                    *http.Server
 	Logger                    *logrus.Entry
@@ -103,6 +109,8 @@ func (h *HTTPHandler) RegisterHandler() {
 	mux.HandleFunc("/snapshot/full", h.serveFullSnapshotTrigger)
 	mux.HandleFunc("/snapshot/delta", h.serveDeltaSnapshotTrigger)
 	mux.HandleFunc("/snapshot/latest", h.serveLatestSnapshotMetadata)
+	mux.HandleFunc("/copyop/initiate", h.serveCopyOperationInitiate)
+	mux.HandleFunc("/copyop/status", h.serveCopyOperationStatus)
 	mux.HandleFunc("/healthz", h.serveHealthz)
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -310,6 +318,76 @@ func (h *HTTPHandler) serveLatestSnapshotMetadata(rw http.ResponseWriter, req *h
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveCopyOperationInitiate(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
+	obj, copyOp, err := copier.GetCopyOperation(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get copy operation: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if copyOp == nil {
+		h.Logger.Info("Initiating copy operation...")
+		obj, copyOp = copier.InitializeCopyOperation()
+		if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+			h.Logger.Warnf("Could not set copy operation: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Copy operation initiated")
+	}
+
+	if copyOp.Status == brtypes.OperationStatusInitial {
+		h.Logger.Info("Waiting for copy operation to become Ready...")
+		obj, copyOp, err = copier.WaitForCopyOperationReady(time.NewTimer(15*time.Second), os)
+		if err != nil {
+			h.Logger.Warnf("Could not wait for copy operation to become Ready: %v", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h.Logger.Info("Copy operation became Ready")
+	}
+
+	json, err := json.Marshal(copyOp)
+	if err != nil {
+		h.Logger.Warnf("Unable to marshal copy operation to json: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(json)
+	return
+}
+
+func (h *HTTPHandler) serveCopyOperationStatus(rw http.ResponseWriter, req *http.Request) {
+	h.checkAndSetSecurityHeaders(rw)
+
+	os := objectstore.NewObjectStore(h.Store, h.Logger)
+
+	_, copyOp, err := copier.GetCopyOperation(os)
+	if err != nil {
+		h.Logger.Warnf("Could not get copy operation: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	json, err := json.Marshal(copyOp)
+	if err != nil {
+		h.Logger.Warnf("Unable to marshal copy operation to json: %v", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	rw.WriteHeader(http.StatusOK)
 	rw.Write(json)
 	return

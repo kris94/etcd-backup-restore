@@ -18,22 +18,26 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/errors"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
+	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
+	cron "github.com/robfig/cron/v3"
+	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/pkg/types"
 
 	"github.com/gardener/etcd-backup-restore/pkg/defragmentor"
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
 	"github.com/gardener/etcd-backup-restore/pkg/initializer"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
-	cron "github.com/robfig/cron/v3"
-	"github.com/sirupsen/logrus"
-	"go.etcd.io/etcd/pkg/types"
 )
 
 // BackupRestoreServer holds the details for backup-restore server.
@@ -87,13 +91,14 @@ func (b *BackupRestoreServer) Run(ctx context.Context) error {
 
 // startHTTPServer creates and starts the HTTP handler
 // with status 503 (Service Unavailable)
-func (b *BackupRestoreServer) startHTTPServer(initializer initializer.Initializer, ssr *snapshotter.Snapshotter) *HTTPHandler {
+func (b *BackupRestoreServer) startHTTPServer(initializer initializer.Initializer, ssr *snapshotter.Snapshotter, ss brtypes.SnapStore) *HTTPHandler {
 	// Start http handler with Error state and wait till snapshotter is up
 	// and running before setting the status to OK.
 	handler := &HTTPHandler{
 		Port:              b.config.ServerConfig.Port,
 		Initializer:       initializer,
 		Snapshotter:       ssr,
+		Store:             ss,
 		Logger:            b.logger,
 		StopCh:            make(chan struct{}),
 		EnableProfiling:   b.config.ServerConfig.EnableProfiling,
@@ -119,7 +124,7 @@ func (b *BackupRestoreServer) runServerWithoutSnapshotter(ctx context.Context, r
 
 	// If no storage provider is given, snapshotter will be nil, in which
 	// case the status is set to OK as soon as etcd probe is successful
-	handler := b.startHTTPServer(etcdInitializer, nil)
+	handler := b.startHTTPServer(etcdInitializer, nil, nil)
 	defer handler.Stop()
 
 	// start defragmentation without trigerring full snapshot
@@ -148,28 +153,56 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 		return err
 	}
 
-	handler := b.startHTTPServer(etcdInitializer, ssr)
+	var cpr *copier.Copier
+	if b.config.CopyBackups {
+		b.logger.Infof("Creating source snapstore from provider: %s", b.config.CopierConfig.SourceSnapstore.Provider)
+		sourceSnapStore, err := snapstore.GetSnapstore(b.config.CopierConfig.SourceSnapstore)
+		if err != nil {
+			return fmt.Errorf("failed to create source snapstore from configured storage provider: %v", err)
+		}
+
+		b.logger.Infof("Creating copier...")
+		cpr = copier.NewCopier(sourceSnapStore, ss, b.logger)
+	}
+
+	handler := b.startHTTPServer(etcdInitializer, ssr, ss)
 	defer handler.Stop()
 
 	ssrStopCh := make(chan struct{})
 	go handleSsrStopRequest(ctx, handler, ssr, ackCh, ssrStopCh)
 	go handleAckState(handler, ackCh)
 
+	timer := time.NewTimer(30 * time.Second)
+	os := objectstore.NewObjectStore(ss, b.logger)
+	go b.handleCopyOperationEvents(timer, os, handler)
+
 	go defragmentor.DefragDataPeriodically(ctx, b.config.EtcdConnectionConfig, b.defragmentationSchedule, ssr.TriggerFullSnapshot, b.logger)
 
-	b.runEtcdProbeLoopWithSnapshotter(ctx, handler, ssr, ssrStopCh, ackCh)
+	b.runEtcdProbeLoopWithSnapshotter(ctx, os, handler, ssr, cpr, ssrStopCh, ackCh)
 	return nil
 }
 
 // runEtcdProbeLoopWithSnapshotter runs the etcd probe loop
 // for the case where snapshotter is configured correctly
-func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, handler *HTTPHandler, ssr *snapshotter.Snapshotter, ssrStopCh chan struct{}, ackCh chan struct{}) {
+func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, os brtypes.ObjectStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, cpr *copier.Copier, ssrStopCh chan struct{}, ackCh chan struct{}) {
 	var (
 		err                       error
 		initialDeltaSnapshotTaken bool
 	)
 
 	for {
+		if b.config.CopyBackups {
+			if err := cpr.HandleCopyOperation(); err != nil {
+				b.logger.Errorf("Copying backups failed: %v", err)
+				handler.SetStatus(http.StatusServiceUnavailable)
+				continue
+			}
+			handler.SetStatus(http.StatusOK)
+			b.logger.Infof("Sleeping for 30 seconds...")
+			time.Sleep(30 * time.Second)
+			continue
+		}
+
 		b.logger.Infof("Probing etcd...")
 		select {
 		case <-ctx.Done():
@@ -181,6 +214,39 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		if err != nil {
 			b.logger.Errorf("Failed to probe etcd: %v", err)
 			handler.SetStatus(http.StatusServiceUnavailable)
+			continue
+		}
+
+		b.logger.Infof("Getting copy operation...")
+		obj, copyOp, err := copier.GetCopyOperation(os)
+		if err != nil {
+			b.logger.Errorf("Failed to get copy operation: %v", err)
+			handler.SetStatus(http.StatusServiceUnavailable)
+			continue
+		}
+		if copyOp != nil {
+			b.logger.Infof("Found copy operation with status %s", copyOp.Status)
+			handler.SetStatus(http.StatusServiceUnavailable)
+
+			if copyOp.Status == brtypes.OperationStatusInitial {
+				// Take the final full snapshot
+				b.logger.Infof("Taking final full snapshot...")
+				if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
+					b.logger.Errorf("Failed to take final full snapshot: %v", err)
+					continue
+				}
+
+				// Set copy operation status to Ready
+				b.logger.Infof("Setting copy operation status to Ready...")
+				copyOp.Status = brtypes.OperationStatusReady
+				if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+					b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
+					continue
+				}
+			}
+
+			b.logger.Infof("Sleeping for 30 seconds...")
+			time.Sleep(30 * time.Second)
 			continue
 		}
 
@@ -252,6 +318,10 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 				b.logger.Errorf("Snapshotter failed with etcd error: %v", etcdErr)
 			} else {
 				metrics.SnapshotterOperationFailure.With(prometheus.Labels{metrics.LabelError: err.Error()}).Inc()
+				// Kill the etcd process to ensure that any open connections from kube-apiserver are terminated
+				if err := b.killEtcdProcess(); err != nil {
+					b.logger.Errorf("Failed to kill etcd process: %v", err)
+				}
 				b.logger.Fatalf("Snapshotter failed with error: %v", err)
 			}
 		}
@@ -259,6 +329,11 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		ackCh <- emptyStruct
 		handler.SetStatus(http.StatusServiceUnavailable)
 		close(gcStopCh)
+
+		// Kill the etcd process to ensure that any open connections from kube-apiserver are terminated
+		if err := b.killEtcdProcess(); err != nil {
+			b.logger.Errorf("Failed to kill etcd process: %v", err)
+		}
 	}
 }
 
@@ -340,4 +415,50 @@ func handleSsrStopRequest(ctx context.Context, handler *HTTPHandler, ssr *snapsh
 			return
 		}
 	}
+}
+
+func (b *BackupRestoreServer) handleCopyOperationEvents(timer *time.Timer, os brtypes.ObjectStore, handler *HTTPHandler) {
+	for {
+		select {
+		case <-timer.C:
+			b.logger.Infof("Getting copy operation...")
+			if _, copyOp, err := copier.GetCopyOperation(os); err != nil || copyOp != nil {
+				if err != nil {
+					b.logger.Infof("Could not get copy operation: %v", err)
+				} else {
+					b.logger.Infof("Copy operation found")
+				}
+				b.logger.Infof("Stopping snapshotter...")
+				atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
+				handler.Logger.Info("Changing handler state...")
+				handler.ReqCh <- emptyStruct
+				handler.Logger.Info("Waiting for acknowledgment...")
+				<-handler.AckCh
+			}
+			timer.Reset(30 * time.Second)
+		}
+	}
+}
+
+func (b *BackupRestoreServer) killEtcdProcess() error {
+	// Check if etcd process exists
+	out, err := exec.Command("sh", "-c", "ps ax | grep \"etcd --config-file\" | grep -v grep | awk '{print $1}' | { grep -Eo '[0-9]{1,}' || true; }").Output()
+	if err != nil {
+		return fmt.Errorf("could not determine etcd process PID: %v", err)
+	}
+	pid := strings.TrimSpace(string(out))
+
+	// If the etcd process doesn't exist, do nothing
+	if pid == "" {
+		b.logger.Infof("etcd process not found")
+		return nil
+	}
+
+	// If etcd process exists, kill it (with SIGTERM, to allow it to terminate gracefully)
+	b.logger.Infof("Killing etcd process with PID %s...", pid)
+	if err := exec.Command("sh", "-c", fmt.Sprintf("kill %s", pid)).Run(); err != nil {
+		return fmt.Errorf("could not kill etcd process with PID %s: %v", pid, err)
+	}
+
+	return nil
 }

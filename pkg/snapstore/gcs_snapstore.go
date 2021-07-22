@@ -32,6 +32,11 @@ import (
 	"google.golang.org/api/iterator"
 
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
+	"google.golang.org/api/option"
+)
+
+const (
+	sourceStoreCredentials = "SOURCE_GOOGLE_APPLICATION_CREDENTIALS"
 )
 
 // GCSSnapStore is snapstore with GCS object store as backend.
@@ -50,9 +55,17 @@ const (
 )
 
 // NewGCSSnapStore create new GCSSnapStore from shared configuration with specified bucket.
-func NewGCSSnapStore(bucket, prefix, tempDir string, maxParallelChunkUploads uint) (*GCSSnapStore, error) {
+func NewGCSSnapStore(bucket, prefix, tempDir string, maxParallelChunkUploads uint, isSource bool) (*GCSSnapStore, error) {
 	ctx := context.TODO()
-	cli, err := storage.NewClient(ctx)
+	var opts []option.ClientOption
+	if isSource {
+		filename := os.Getenv(sourceStoreCredentials)
+		if filename == "" {
+			return nil, fmt.Errorf("environment variable %s is not set", sourceStoreCredentials)
+		}
+		opts = append(opts, option.WithCredentialsFile(filename))
+	}
+	cli, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +87,7 @@ func NewGCSSnapStoreFromClient(bucket, prefix, tempDir string, maxParallelChunkU
 
 // Fetch should open reader for the snapshot file from store.
 func (s *GCSSnapStore) Fetch(snap brtypes.Snapshot) (io.ReadCloser, error) {
-	objectName := path.Join(snap.Prefix, snap.SnapDir, snap.SnapName)
+	objectName := path.Join(s.getPrefix(snap), snap.SnapDir, snap.SnapName)
 	ctx := context.TODO()
 	return s.client.Bucket(s.bucket).Object(objectName).NewReader(ctx)
 }
@@ -226,7 +239,7 @@ func (s *GCSSnapStore) List() (brtypes.SnapList, error) {
 			snap, err := ParseSnapshot(v.Name)
 			if err != nil {
 				// Warning
-				logrus.Warnf("Invalid snapshot found. Ignoring it:%s\n", v.Name)
+				logrus.Warnf("Invalid snapshot %s found, ignoring it: %v", v.Name, err)
 			} else {
 				snapList = append(snapList, snap)
 			}
@@ -239,6 +252,13 @@ func (s *GCSSnapStore) List() (brtypes.SnapList, error) {
 
 // Delete should delete the snapshot file from store.
 func (s *GCSSnapStore) Delete(snap brtypes.Snapshot) error {
-	objectName := path.Join(snap.Prefix, snap.SnapDir, snap.SnapName)
+	objectName := path.Join(s.getPrefix(snap), snap.SnapDir, snap.SnapName)
 	return s.client.Bucket(s.bucket).Object(objectName).Delete(context.TODO())
+}
+
+func (s *GCSSnapStore) getPrefix(snap brtypes.Snapshot) string {
+	if snap.Prefix != "" {
+		return snap.Prefix
+	}
+	return s.prefix
 }

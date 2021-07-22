@@ -19,13 +19,11 @@ import (
 	"io/ioutil"
 
 	"github.com/gardener/etcd-backup-restore/pkg/compressor"
-	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
-
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
-
-	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
-
 	"github.com/gardener/etcd-backup-restore/pkg/initializer/validator"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
+	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 
 	"github.com/gardener/etcd-backup-restore/pkg/server"
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
@@ -256,4 +254,30 @@ func (c *snapshotterOptions) validate() error {
 // complete completes the config.
 func (c *snapshotterOptions) complete() {
 	c.snapstoreConfig.Complete()
+}
+
+type copierOptions struct {
+	copierConfig    *brtypes.CopierConfig
+	snapstoreConfig *brtypes.SnapstoreConfig
+}
+
+func newCopierOptions() *copierOptions {
+	return &copierOptions{
+		copierConfig:    copier.NewCopierConfig(),
+		snapstoreConfig: snapstore.NewSnapstoreConfig(),
+	}
+}
+
+func (c *copierOptions) addFlags(fs *flag.FlagSet) {
+	c.copierConfig.AddFlags(fs)
+	c.snapstoreConfig.AddFlags(fs)
+}
+
+func (c *copierOptions) validate() error {
+	return c.copierConfig.Validate()
+}
+
+func (c *copierOptions) complete() {
+	c.snapstoreConfig.Complete()
+	c.copierConfig.CompleteWithSnapstoreConfig(c.snapstoreConfig)
 }

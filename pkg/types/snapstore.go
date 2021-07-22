@@ -51,6 +51,8 @@ const (
 	SnapshotKindDelta = "Incr"
 	// SnapshotKindChunk is constant for chunk snapshot kind.
 	SnapshotKindChunk = "Chunk"
+	// SnapshotKindObject is constant for object snapshot kind.
+	SnapshotKindObject = "Object"
 
 	// AzureBlobStorageHostName is the host name for azure blob storage service.
 	AzureBlobStorageHostName = "blob.core.windows.net"
@@ -91,15 +93,28 @@ func (s *Snapshot) GenerateSnapshotName() {
 	s.SnapName = fmt.Sprintf("%s-%08d-%08d-%d%s", s.Kind, s.StartRevision, s.LastRevision, s.CreatedOn.Unix(), s.CompressionSuffix)
 }
 
+// GenerateObjectSnapshotName generates the snapshot name from the object metadata.
+func (s *Snapshot) GenerateObjectSnapshotName(kind, name string) {
+	s.SnapName = fmt.Sprintf("%s-%s-%s-%d", s.Kind, kind, name, s.CreatedOn.Unix())
+}
+
 // GenerateSnapshotDirectory prepares the snapshot directory name from metadata
 func (s *Snapshot) GenerateSnapshotDirectory() {
-	s.SnapDir = fmt.Sprintf("Backup-%d", s.CreatedOn.Unix())
+	s.SnapDir = fmt.Sprintf("%s-%d", s.GetDirectoryPrefix(), s.CreatedOn.Unix())
 }
 
 // GetSnapshotDirectoryCreationTimeInUnix returns the creation time for snapshot directory.
 func (s *Snapshot) GetSnapshotDirectoryCreationTimeInUnix() (int64, error) {
-	tok := strings.TrimPrefix(s.SnapDir, "Backup-")
+	tok := strings.TrimPrefix(s.SnapDir, fmt.Sprintf("%s-", s.GetDirectoryPrefix()))
 	return strconv.ParseInt(tok, 10, 64)
+}
+
+// GetDirectoryPrefix returns the appropriate snapshot directory prefix, either Object or Backup.
+func (s *Snapshot) GetDirectoryPrefix() string {
+	if s.Kind == SnapshotKindObject {
+		return "Object"
+	}
+	return "Backup"
 }
 
 // SnapList is list of snapshots.
@@ -146,6 +161,8 @@ type SnapstoreConfig struct {
 	MaxParallelChunkUploads uint `json:"maxParallelChunkUploads,omitempty"`
 	// Temporary Directory
 	TempDir string `json:"tempDir,omitempty"`
+	// IsSource determines if this SnapStore is the source for a copy operation
+	IsSource bool `json:"isSource,omitempty"`
 }
 
 // AddFlags adds the flags to flagset.
@@ -168,4 +185,18 @@ func (c *SnapstoreConfig) Validate() error {
 // Complete completes the config.
 func (c *SnapstoreConfig) Complete() {
 	c.Prefix = path.Join(c.Prefix, backupFormatVersion)
+}
+
+// CompleteWithOther completes the config based on other config
+func (c *SnapstoreConfig) CompleteWithOther(other *SnapstoreConfig) {
+	if c.Provider == "" {
+		c.Provider = other.Provider
+	}
+	if c.Prefix == "" {
+		c.Prefix = other.Prefix
+	} else {
+		c.Prefix = path.Join(c.Prefix, backupFormatVersion)
+	}
+	c.MaxParallelChunkUploads = other.MaxParallelChunkUploads
+	c.TempDir = other.TempDir
 }

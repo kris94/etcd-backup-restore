@@ -20,6 +20,7 @@ import (
 
 	"github.com/gardener/etcd-backup-restore/pkg/compressor"
 	"github.com/gardener/etcd-backup-restore/pkg/etcdutil"
+	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/snapshotter"
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
 
@@ -34,6 +35,7 @@ func NewBackupRestoreComponentConfig() *BackupRestoreComponentConfig {
 		EtcdConnectionConfig:    etcdutil.NewEtcdConnectionConfig(),
 		ServerConfig:            NewHTTPServerConfig(),
 		SnapshotterConfig:       snapshotter.NewSnapshotterConfig(),
+		CopierConfig:            copier.NewCopierConfig(),
 		SnapstoreConfig:         snapstore.NewSnapstoreConfig(),
 		CompressionConfig:       compressor.NewCompressorConfig(),
 		RestorationConfig:       brtypes.NewRestorationConfig(),
@@ -46,12 +48,14 @@ func (c *BackupRestoreComponentConfig) AddFlags(fs *flag.FlagSet) {
 	c.EtcdConnectionConfig.AddFlags(fs)
 	c.ServerConfig.AddFlags(fs)
 	c.SnapshotterConfig.AddFlags(fs)
+	c.CopierConfig.AddFlags(fs)
 	c.SnapstoreConfig.AddFlags(fs)
 	c.RestorationConfig.AddFlags(fs)
 	c.CompressionConfig.AddFlags(fs)
 
 	// Miscellaneous
 	fs.StringVar(&c.DefragmentationSchedule, "defragmentation-schedule", c.DefragmentationSchedule, "schedule to defragment etcd data directory")
+	fs.BoolVar(&c.CopyBackups, "copy-backups", c.CopyBackups, "Determines whether etcd backups should be copied")
 }
 
 // Validate validates the config.
@@ -83,6 +87,7 @@ func (c *BackupRestoreComponentConfig) Validate() error {
 // Complete completes the config.
 func (c *BackupRestoreComponentConfig) Complete() {
 	c.SnapstoreConfig.Complete()
+	c.CopierConfig.CompleteWithSnapstoreConfig(c.SnapstoreConfig)
 }
 
 // HTTPServerConfig holds the server config.

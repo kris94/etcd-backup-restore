@@ -38,6 +38,16 @@ func NewSnapshot(kind string, startRevision, lastRevision int64, compressionSuff
 	return snap
 }
 
+// NewObjectSnapshot creates a new snapshot of type object.
+func NewObjectSnapshot(kind, name string, createdOn time.Time) *brtypes.Snapshot {
+	snap := &brtypes.Snapshot{
+		Kind:      brtypes.SnapshotKindObject,
+		CreatedOn: createdOn,
+	}
+	snap.GenerateObjectSnapshotName(kind, name)
+	return snap
+}
+
 // ParseSnapshot parse <snapPath> to create snapshot structure
 func ParseSnapshot(snapPath string) (*brtypes.Snapshot, error) {
 	logrus.Debugf("Snap path: %s", snapPath)
@@ -102,27 +112,32 @@ func ParseSnapshot(snapPath string) (*brtypes.Snapshot, error) {
 		s.Kind = brtypes.SnapshotKindFull
 	case brtypes.SnapshotKindDelta:
 		s.Kind = brtypes.SnapshotKindDelta
+	case brtypes.SnapshotKindObject:
+		s.Kind = brtypes.SnapshotKindObject
 	default:
 		return nil, fmt.Errorf("unknown snapshot kind: %s", tokens[0])
 	}
 
-	//parse start revision
-	s.StartRevision, err = strconv.ParseInt(tokens[1], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid start revision: %s", tokens[1])
-	}
-	//parse last revision
-	s.LastRevision, err = strconv.ParseInt(tokens[2], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid last revision: %s", tokens[2])
-	}
+	if s.Kind != brtypes.SnapshotKindObject {
+		//parse start revision
+		s.StartRevision, err = strconv.ParseInt(tokens[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start revision: %s", tokens[1])
+		}
+		//parse last revision
+		s.LastRevision, err = strconv.ParseInt(tokens[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid last revision: %s", tokens[2])
+		}
 
-	if s.StartRevision > s.LastRevision {
-		return nil, fmt.Errorf("last revision (%s) should be at least start revision(%s) ", tokens[2], tokens[1])
+		if s.StartRevision > s.LastRevision {
+			return nil, fmt.Errorf("last revision (%s) should be at least start revision(%s) ", tokens[2], tokens[1])
+		}
 	}
 
 	//parse creation time as well as parse the Snapshot compression suffix
-	timeWithSnapSuffix := strings.Split(tokens[3], ".")
+	lastNameToken := strings.Split(tokens[3], "/")
+	timeWithSnapSuffix := strings.Split(lastNameToken[0], ".")
 	if len(timeWithSnapSuffix) == 2 {
 		s.CompressionSuffix = "." + timeWithSnapSuffix[1]
 	}
