@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -174,7 +175,7 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 
 	timer := time.NewTimer(30 * time.Second)
 	os := objectstore.NewObjectStore(ss, b.logger)
-	go b.handleCopyOperationEvents(timer, os, handler)
+	go b.handleTimerEvents(timer, os, handler)
 
 	go defragmentor.DefragDataPeriodically(ctx, b.config.EtcdConnectionConfig, b.defragmentationSchedule, ssr.TriggerFullSnapshot, b.logger)
 
@@ -220,9 +221,25 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 		b.logger.Infof("Getting copy operation...")
 		obj, copyOp, err := copier.GetCopyOperation(os)
 		if err != nil {
-			b.logger.Errorf("Failed to get copy operation: %v", err)
+			b.logger.Errorf("Could not get copy operation: %v", err)
 			handler.SetStatus(http.StatusServiceUnavailable)
 			continue
+		}
+		isOwner, err := b.isOwner()
+		if err != nil {
+			b.logger.Errorf("Could not check owner: %v", err)
+			handler.SetStatus(http.StatusServiceUnavailable)
+			continue
+		}
+		if !isOwner && copyOp == nil {
+			b.logger.Info("Initiating copy operation...")
+			obj, copyOp = copier.InitializeCopyOperation()
+			if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
+				b.logger.Errorf("Could not set copy operation: %v", err)
+				handler.SetStatus(http.StatusServiceUnavailable)
+				continue
+			}
+			b.logger.Info("Copy operation initiated")
 		}
 		if copyOp != nil {
 			b.logger.Infof("Found copy operation with status %s", copyOp.Status)
@@ -318,10 +335,6 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 				b.logger.Errorf("Snapshotter failed with etcd error: %v", etcdErr)
 			} else {
 				metrics.SnapshotterOperationFailure.With(prometheus.Labels{metrics.LabelError: err.Error()}).Inc()
-				// Kill the etcd process to ensure that any open connections from kube-apiserver are terminated
-				if err := b.killEtcdProcess(); err != nil {
-					b.logger.Errorf("Failed to kill etcd process: %v", err)
-				}
 				b.logger.Fatalf("Snapshotter failed with error: %v", err)
 			}
 		}
@@ -417,27 +430,66 @@ func handleSsrStopRequest(ctx context.Context, handler *HTTPHandler, ssr *snapsh
 	}
 }
 
-func (b *BackupRestoreServer) handleCopyOperationEvents(timer *time.Timer, os brtypes.ObjectStore, handler *HTTPHandler) {
+func (b *BackupRestoreServer) handleTimerEvents(timer *time.Timer, os brtypes.ObjectStore, handler *HTTPHandler) {
 	for {
 		select {
 		case <-timer.C:
-			b.logger.Infof("Getting copy operation...")
-			if _, copyOp, err := copier.GetCopyOperation(os); err != nil || copyOp != nil {
+			func() {
+				defer timer.Reset(30 * time.Second)
+
+				b.logger.Infof("Checking owner...")
+				isOwner, err := b.isOwner()
 				if err != nil {
-					b.logger.Infof("Could not get copy operation: %v", err)
-				} else {
-					b.logger.Infof("Copy operation found")
+					b.logger.Errorf("Could not check owner: %v", err)
+					b.stopSnapshotter(handler)
+					return
 				}
-				b.logger.Infof("Stopping snapshotter...")
-				atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
-				handler.Logger.Info("Changing handler state...")
-				handler.ReqCh <- emptyStruct
-				handler.Logger.Info("Waiting for acknowledgment...")
-				<-handler.AckCh
-			}
-			timer.Reset(30 * time.Second)
+				if !isOwner {
+					b.logger.Info("Owner check failed")
+					b.stopSnapshotter(handler)
+					return
+				}
+
+				b.logger.Infof("Getting copy operation...")
+				_, copyOp, err := copier.GetCopyOperation(os)
+				if err != nil {
+					b.logger.Errorf("Could not get copy operation: %v", err)
+					b.stopSnapshotter(handler)
+					return
+				}
+				if copyOp != nil {
+					b.logger.Info("Copy operation found")
+					b.stopSnapshotter(handler)
+					return
+				}
+			}()
 		}
 	}
+}
+
+func (b *BackupRestoreServer) stopSnapshotter(handler *HTTPHandler) {
+	b.logger.Infof("Stopping snapshotter...")
+	atomic.StoreUint32(&handler.AckState, HandlerAckWaiting)
+	handler.Logger.Info("Changing handler state...")
+	handler.ReqCh <- emptyStruct
+	handler.Logger.Info("Waiting for acknowledgment...")
+	<-handler.AckCh
+}
+
+func (b *BackupRestoreServer) isOwner() (bool, error) {
+	if b.config.OwnerConfig.OwnerName == "" || b.config.OwnerConfig.OwnerID == "" {
+		return true, nil
+	}
+	owner, err := net.LookupTXT(b.config.OwnerConfig.OwnerName)
+	if err != nil {
+		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
+			b.logger.Infof("%s DNS TXT record not found", b.config.OwnerConfig.OwnerName)
+			return false, nil
+		}
+		return false, fmt.Errorf("could not resolve %s DNS TXT record: %v", b.config.OwnerConfig.OwnerName, err)
+	}
+	b.logger.Infof("Resolved %s DNS TXT record to %v, expected value is %s", b.config.OwnerConfig.OwnerName, owner, b.config.OwnerConfig.OwnerID)
+	return len(owner) > 0 && owner[0] == b.config.OwnerConfig.OwnerID, nil
 }
 
 func (b *BackupRestoreServer) killEtcdProcess() error {

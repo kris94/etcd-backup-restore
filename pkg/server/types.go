@@ -34,6 +34,7 @@ type BackupRestoreComponentConfig struct {
 	SnapstoreConfig         *brtypes.SnapstoreConfig       `json:"snapstoreConfig,omitempty"`
 	CompressionConfig       *compressor.CompressionConfig  `json:"compressionConfig,omitempty"`
 	RestorationConfig       *brtypes.RestorationConfig     `json:"restorationConfig,omitempty"`
+	OwnerConfig             *brtypes.OwnerConfig           `json:"ownerCheckConfig,omitempty"`
 	DefragmentationSchedule string                         `json:"defragmentationSchedule"`
 	CopyBackups             bool                           `json:"copyBackups"`
 }

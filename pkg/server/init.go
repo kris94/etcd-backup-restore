@@ -39,6 +39,7 @@ func NewBackupRestoreComponentConfig() *BackupRestoreComponentConfig {
 		SnapstoreConfig:         snapstore.NewSnapstoreConfig(),
 		CompressionConfig:       compressor.NewCompressorConfig(),
 		RestorationConfig:       brtypes.NewRestorationConfig(),
+		OwnerConfig:             brtypes.NewOwnerConfig(),
 		DefragmentationSchedule: defaultDefragmentationSchedule,
 	}
 }
@@ -52,6 +53,7 @@ func (c *BackupRestoreComponentConfig) AddFlags(fs *flag.FlagSet) {
 	c.SnapstoreConfig.AddFlags(fs)
 	c.RestorationConfig.AddFlags(fs)
 	c.CompressionConfig.AddFlags(fs)
+	c.OwnerConfig.AddFlags(fs)
 
 	// Miscellaneous
 	fs.StringVar(&c.DefragmentationSchedule, "defragmentation-schedule", c.DefragmentationSchedule, "schedule to defragment etcd data directory")
@@ -69,6 +71,9 @@ func (c *BackupRestoreComponentConfig) Validate() error {
 	if err := c.SnapshotterConfig.Validate(); err != nil {
 		return err
 	}
+	if err := c.CopierConfig.Validate(); err != nil {
+		return err
+	}
 	if err := c.SnapstoreConfig.Validate(); err != nil {
 		return err
 	}
@@ -76,6 +81,9 @@ func (c *BackupRestoreComponentConfig) Validate() error {
 		return err
 	}
 	if err := c.CompressionConfig.Validate(); err != nil {
+		return err
+	}
+	if err := c.OwnerConfig.Validate(); err != nil {
 		return err
 	}
 	if _, err := cron.ParseStandard(c.DefragmentationSchedule); err != nil {
