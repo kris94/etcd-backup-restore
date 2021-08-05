@@ -114,7 +114,7 @@ func NewSnapshotter(logger *logrus.Entry, config *brtypes.SnapshotterConfig, sto
 		metrics.LatestSnapshotTimestamp.With(prometheus.Labels{metrics.LabelKind: brtypes.SnapshotKindDelta}).Set(float64(prevSnapshot.CreatedOn.Unix()))
 	} else {
 		// creating dummy previous snapshot since fullSnap == nil
-		prevSnapshot = snapstore.NewSnapshot(brtypes.SnapshotKindFull, 0, 0, "")
+		prevSnapshot = snapstore.NewSnapshot(brtypes.SnapshotKindFull, 0, 0, "", false)
 	}
 
 	metrics.LatestSnapshotRevision.With(prometheus.Labels{metrics.LabelKind: prevSnapshot.Kind}).Set(float64(prevSnapshot.LastRevision))
@@ -245,9 +245,9 @@ func (ssr *Snapshotter) closeEtcdClient() {
 
 // TakeFullSnapshotAndResetTimer takes a full snapshot and resets the full snapshot
 // timer as per the schedule.
-func (ssr *Snapshotter) TakeFullSnapshotAndResetTimer() (*brtypes.Snapshot, error) {
+func (ssr *Snapshotter) TakeFullSnapshotAndResetTimer(isFinal bool) (*brtypes.Snapshot, error) {
 	ssr.logger.Infof("Taking scheduled snapshot for time: %s", time.Now().Local())
-	s, err := ssr.takeFullSnapshot()
+	s, err := ssr.takeFullSnapshot(isFinal)
 	if err != nil {
 		// As per design principle, in business critical service if backup is not working,
 		// it's better to fail the process. So, we are quiting here.
@@ -261,7 +261,7 @@ func (ssr *Snapshotter) TakeFullSnapshotAndResetTimer() (*brtypes.Snapshot, erro
 // takeFullSnapshot will store full snapshot of etcd to brtypes.
 // It basically will connect to etcd. Then ask for snapshot. And finally
 // store it to underlying snapstore on the fly.
-func (ssr *Snapshotter) takeFullSnapshot() (*brtypes.Snapshot, error) {
+func (ssr *Snapshotter) takeFullSnapshot(isFinal bool) (*brtypes.Snapshot, error) {
 	defer ssr.cleanupInMemoryEvents()
 	// close previous watch and client.
 	ssr.closeEtcdClient()
@@ -299,7 +299,7 @@ func (ssr *Snapshotter) takeFullSnapshot() (*brtypes.Snapshot, error) {
 			return nil, fmt.Errorf("failed to get compressionSuffix: %v", err)
 		}
 
-		s, err := etcdutil.TakeAndSaveFullSnapshot(ctx, client, ssr.store, lastRevision, ssr.compressionConfig, compressionSuffix, ssr.logger)
+		s, err := etcdutil.TakeAndSaveFullSnapshot(ctx, client, ssr.store, lastRevision, ssr.compressionConfig, compressionSuffix, isFinal, ssr.logger)
 		if err != nil {
 			return nil, err
 		}
@@ -386,7 +386,7 @@ func (ssr *Snapshotter) TakeDeltaSnapshot() (*brtypes.Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get compressionSuffix: %v", err)
 	}
-	snap := snapstore.NewSnapshot(brtypes.SnapshotKindDelta, ssr.prevSnapshot.LastRevision+1, ssr.lastEventRevision, compressionSuffix)
+	snap := snapstore.NewSnapshot(brtypes.SnapshotKindDelta, ssr.prevSnapshot.LastRevision+1, ssr.lastEventRevision, compressionSuffix, false)
 	snap.SnapDir = ssr.prevSnapshot.SnapDir
 
 	// compute hash
@@ -549,7 +549,7 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 	for {
 		select {
 		case <-ssr.fullSnapshotReqCh:
-			s, err := ssr.TakeFullSnapshotAndResetTimer()
+			s, err := ssr.TakeFullSnapshotAndResetTimer(false)
 			res := result{
 				Snapshot: s,
 				Err:      err,
@@ -571,7 +571,7 @@ func (ssr *Snapshotter) snapshotEventHandler(stopCh <-chan struct{}) error {
 			}
 
 		case <-ssr.fullSnapshotTimer.C:
-			if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
+			if _, err := ssr.TakeFullSnapshotAndResetTimer(false); err != nil {
 				return err
 			}
 

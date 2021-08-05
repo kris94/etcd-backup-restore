@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
-	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
 	"github.com/gardener/etcd-backup-restore/pkg/snapstore"
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
 
@@ -66,150 +65,110 @@ func NewCopier(sourceSnapStore brtypes.SnapStore, snapStore brtypes.SnapStore, l
 	}
 }
 
-// Run runs the copy command.
+// Run executes the copy command.
 func (c *Copier) Run() error {
-	backups, err := miscellaneous.GetAllBackups(c.sourceSnapStore)
+	return c.CopyBackups()
+}
+
+// CopyBackups copies all backups from the source store to the destination store.
+func (c *Copier) CopyBackups() error {
+	// Get source backups
+	c.logger.Info("Getting source backups...")
+	sourceBackups, err := miscellaneous.GetAllBackups(c.sourceSnapStore)
 	if err != nil {
-		return fmt.Errorf("failed to get backups from source: %v", err)
-	}
-	if backups == nil {
-		return fmt.Errorf("no snapshots found, will do nothing")
+		return fmt.Errorf("could not get source backups: %v", err)
 	}
 
-	for _, backup := range backups {
-		rc, err := c.sourceSnapStore.Fetch(*backup.FullSnapshot)
-		if err != nil {
-			return fmt.Errorf("failed to fetch full snapshot from source: %v", err)
-		}
+	// If there are no source backups, do nothing
+	if len(sourceBackups) == 0 {
+		c.logger.Info("No source backups found")
+		return nil
+	}
 
-		if err := c.snapStore.Save(*backup.FullSnapshot, rc); err != nil {
-			return fmt.Errorf("failed to save full snapshot to destination: %v", err)
-		}
+	// Get destination snapshots and build a map keyed by name
+	c.logger.Info("Getting destination snapshots...")
+	snapshots, err := c.snapStore.List()
+	if err != nil {
+		return fmt.Errorf("could not get destination snapshots: %v", err)
+	}
+	snapshotsMap := make(map[string]*brtypes.Snapshot)
+	for _, snapshot := range snapshots {
+		snapshotsMap[snapshot.SnapName] = snapshot
+	}
 
-		for _, deltaSnap := range backup.DeltaSnapshotList {
-			rc, err := c.sourceSnapStore.Fetch(*deltaSnap)
-			if err != nil {
-				return fmt.Errorf("failed to fetch delta snapshot from source: %v", err)
+	for _, backup := range sourceBackups {
+		// Copy the full snapshot (if not already copied)
+		if _, ok := snapshotsMap[backup.FullSnapshot.SnapName]; !ok {
+			c.logger.Infof("Copying full snapshot %s...", backup.FullSnapshot.SnapName)
+			backup.FullSnapshot.IsFinal = false
+			if err := c.copySnapshot(backup.FullSnapshot); err != nil {
+				return err
 			}
+		} else {
+			c.logger.Infof("Skipping full snapshot %s as it already exists", backup.FullSnapshot.SnapName)
+		}
 
-			if err := c.snapStore.Save(*deltaSnap, rc); err != nil {
-				return fmt.Errorf("failed to save delta snapshot to destination: %v", err)
+		// Copy all delta snapshots (if not already copied)
+		for _, deltaSnapshot := range backup.DeltaSnapshotList {
+			if _, ok := snapshotsMap[deltaSnapshot.SnapName]; !ok {
+				c.logger.Infof("Copying delta snapshot %s...", deltaSnapshot.SnapName)
+				if err := c.copySnapshot(deltaSnapshot); err != nil {
+					return err
+				}
+			} else {
+				c.logger.Infof("Skipping delta snapshot %s as it already exists", deltaSnapshot.SnapName)
 			}
 		}
 	}
 	return nil
 }
 
-// HandleCopyOperation gets and handles a CopyOperation object in the source store.
-func (c *Copier) HandleCopyOperation() error {
-	os := objectstore.NewObjectStore(c.sourceSnapStore, c.logger)
-
-	obj, copyOp, err := GetCopyOperation(os)
+func (c *Copier) copySnapshot(snapshot *brtypes.Snapshot) error {
+	rc, err := c.sourceSnapStore.Fetch(*snapshot)
 	if err != nil {
-		return fmt.Errorf("could not get copy operation: %v", err)
+		return fmt.Errorf("could not fetch snapshot %s from source store: %v", snapshot.SnapName, err)
 	}
 
-	if copyOp == nil {
-		c.logger.Info("Initiating copy operation...")
-		obj, copyOp = InitializeCopyOperation()
-		if err := SetCopyOperation(os, obj, copyOp); err != nil {
-			return fmt.Errorf("could not set copy operation: %v", err)
-		}
-		c.logger.Info("Copy operation initiated")
+	if err := c.snapStore.Save(*snapshot, rc); err != nil {
+		return fmt.Errorf("could not save snapshot %s to destination store: %v", snapshot.SnapName, err)
 	}
 
-	if copyOp.Status == brtypes.OperationStatusDone {
-		c.logger.Info("Operation is already Done, nothing to do")
-		return nil
-	}
+	return nil
+}
 
-	if copyOp.Status == brtypes.OperationStatusInitial {
-		c.logger.Info("Waiting for copy operation to become Ready...")
-		obj, copyOp, err = WaitForCopyOperationReady(time.NewTimer(15*time.Second), os)
-		if err != nil {
-			return fmt.Errorf("could not wait for copy operation to become Ready: %v", err)
-		}
-		c.logger.Info("Copy operation became Ready")
+// CopyBackupsWhenFinalFullSnapshotDetected copies all backups from the source store to the destination store
+// when a final full snapshot is detected in the source store.
+func (c *Copier) CopyBackupsWhenFinalFullSnapshotDetected() error {
+	c.logger.Info("Waiting for final full snapshot...")
+	if _, err := waitForFinalFullSnapshot(15*time.Second, c.sourceSnapStore); err != nil {
+		return fmt.Errorf("could not wait for final full snapshot: %v", err)
 	}
+	c.logger.Info("Final full snapshot detected")
 
 	c.logger.Info("Copying backups ...")
-	if err := c.Run(); err != nil {
+	if err := c.CopyBackups(); err != nil {
 		return fmt.Errorf("could not copy backups: %v", err)
 	}
 	c.logger.Info("Backups copied")
 
-	c.logger.Info("Setting copy operation status to Done...")
-	copyOp.Status = brtypes.OperationStatusDone
-	if err := SetCopyOperation(os, obj, copyOp); err != nil {
-		return fmt.Errorf("could not set copy operation: %v", err)
-	}
-	c.logger.Info("Copy operation status set to Done")
-
 	return nil
 }
 
-// WaitForCopyOperationReady waits for a copy operation in the given object store to become ready.
-// When this is the case, it returns the copy operation and its corresponding object.
-func WaitForCopyOperationReady(timer *time.Timer, os brtypes.ObjectStore) (*brtypes.Object, *brtypes.CopyOperation, error) {
+// waitForFinalFullSnapshot waits for a final full snapshot in the given store.
+func waitForFinalFullSnapshot(d time.Duration, ss brtypes.SnapStore) (*brtypes.Snapshot, error) {
+	timer := time.NewTimer(d)
 	for {
 		select {
 		case <-timer.C:
-			var obj *brtypes.Object
-			var copyOp *brtypes.CopyOperation
-			var err error
-			if obj, copyOp, err = GetCopyOperation(os); err != nil {
-				return nil, nil, err
+			fullSnapshot, _, err := miscellaneous.GetLatestFullSnapshotAndDeltaSnapList(ss)
+			if err != nil {
+				return nil, err
 			}
-			if copyOp != nil && copyOp.Status == brtypes.OperationStatusReady {
-				return obj, copyOp, nil
+			if fullSnapshot != nil && fullSnapshot.IsFinal {
+				return fullSnapshot, nil
 			}
-			timer.Reset(15 * time.Second)
+
+			timer.Reset(d)
 		}
 	}
-}
-
-// InitializeCopyOperation initializes a new copy operation and its corresponding object.
-func InitializeCopyOperation() (*brtypes.Object, *brtypes.CopyOperation) {
-	now := time.Now().UTC()
-	copyOp := &brtypes.CopyOperation{
-		Status: brtypes.OperationStatusInitial,
-	}
-	obj := &brtypes.Object{
-		Kind:      brtypes.ObjectKindCopyOperation,
-		Name:      "test",
-		CreatedOn: now,
-	}
-	return obj, copyOp
-}
-
-// GetCopyOperation reads a copy operation and its corresponding object from the given object store.
-func GetCopyOperation(os brtypes.ObjectStore) (*brtypes.Object, *brtypes.CopyOperation, error) {
-	objects, err := os.List()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if len(objects) == 0 {
-		return nil, nil, nil
-	}
-	if len(objects) > 1 {
-		return nil, nil, fmt.Errorf("multiple objects found")
-	}
-	if objects[0].Kind != brtypes.ObjectKindCopyOperation {
-		return nil, nil, fmt.Errorf("found object of kind different from CopyOperation")
-	}
-
-	copyOp := &brtypes.CopyOperation{}
-	if err := os.Read(objects[0], copyOp); err != nil {
-		return nil, nil, err
-	}
-	return objects[0], copyOp, nil
-}
-
-// SetCopyOperation writes the given copy operation and its corresponding object to the given object store.
-func SetCopyOperation(os brtypes.ObjectStore, obj *brtypes.Object, copyOp *brtypes.CopyOperation) error {
-	if err := os.Write(obj, copyOp); err != nil {
-		return err
-	}
-	return nil
 }

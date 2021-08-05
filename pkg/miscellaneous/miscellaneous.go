@@ -40,7 +40,7 @@ func GetLatestFullSnapshotAndDeltaSnapList(store brtypes.SnapStore) (*brtypes.Sn
 	}
 
 	for index := len(snapList); index > 0; index-- {
-		if snapList[index-1].IsChunk || snapList[index-1].Kind == brtypes.SnapshotKindObject {
+		if snapList[index-1].IsChunk {
 			continue
 		}
 		if snapList[index-1].Kind == brtypes.SnapshotKindFull {
@@ -78,7 +78,7 @@ func GetAllBackups(store brtypes.SnapStore) ([]Backup, error) {
 
 	backup := Backup{}
 	for i := len(snapList) - 1; i >= 0; i-- {
-		if snapList[i].IsChunk || snapList[i].Kind == brtypes.SnapshotKindObject {
+		if snapList[i].IsChunk {
 			continue
 		}
 		if snapList[i].Kind == brtypes.SnapshotKindFull {

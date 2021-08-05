@@ -26,7 +26,7 @@ import (
 
 	"github.com/gardener/etcd-backup-restore/pkg/errors"
 	"github.com/gardener/etcd-backup-restore/pkg/metrics"
-	"github.com/gardener/etcd-backup-restore/pkg/objectstore"
+	"github.com/gardener/etcd-backup-restore/pkg/miscellaneous"
 	"github.com/gardener/etcd-backup-restore/pkg/snapshot/copier"
 	brtypes "github.com/gardener/etcd-backup-restore/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -173,19 +173,17 @@ func (b *BackupRestoreServer) runServerWithSnapshotter(ctx context.Context, rest
 	go handleSsrStopRequest(ctx, handler, ssr, ackCh, ssrStopCh)
 	go handleAckState(handler, ackCh)
 
-	timer := time.NewTimer(30 * time.Second)
-	os := objectstore.NewObjectStore(ss, b.logger)
-	go b.handleTimerEvents(timer, os, handler)
+	go b.checkOwner(30*time.Second, handler)
 
 	go defragmentor.DefragDataPeriodically(ctx, b.config.EtcdConnectionConfig, b.defragmentationSchedule, ssr.TriggerFullSnapshot, b.logger)
 
-	b.runEtcdProbeLoopWithSnapshotter(ctx, os, handler, ssr, cpr, ssrStopCh, ackCh)
+	b.runEtcdProbeLoopWithSnapshotter(ctx, ss, handler, ssr, cpr, ssrStopCh, ackCh)
 	return nil
 }
 
 // runEtcdProbeLoopWithSnapshotter runs the etcd probe loop
 // for the case where snapshotter is configured correctly
-func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, os brtypes.ObjectStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, cpr *copier.Copier, ssrStopCh chan struct{}, ackCh chan struct{}) {
+func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Context, ss brtypes.SnapStore, handler *HTTPHandler, ssr *snapshotter.Snapshotter, cpr *copier.Copier, ssrStopCh chan struct{}, ackCh chan struct{}) {
 	var (
 		err                       error
 		initialDeltaSnapshotTaken bool
@@ -193,7 +191,7 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 
 	for {
 		if b.config.CopyBackups {
-			if err := cpr.HandleCopyOperation(); err != nil {
+			if err := cpr.CopyBackupsWhenFinalFullSnapshotDetected(); err != nil {
 				b.logger.Errorf("Copying backups failed: %v", err)
 				handler.SetStatus(http.StatusServiceUnavailable)
 				continue
@@ -218,52 +216,39 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			continue
 		}
 
-		b.logger.Infof("Getting copy operation...")
-		obj, copyOp, err := copier.GetCopyOperation(os)
+		b.logger.Infof("Getting latest full snapshot...")
+		fullSnapshot, _, err := miscellaneous.GetLatestFullSnapshotAndDeltaSnapList(ss)
 		if err != nil {
-			b.logger.Errorf("Could not get copy operation: %v", err)
+			b.logger.Errorf("Could not get latest full snapshot: %v", err)
 			handler.SetStatus(http.StatusServiceUnavailable)
 			continue
 		}
-		isOwner, err := b.isOwner()
-		if err != nil {
-			b.logger.Errorf("Could not check owner: %v", err)
+		if fullSnapshot != nil && fullSnapshot.IsFinal {
+			b.logger.Infof("Latest full snapshot is marked as final, snapshotter will not be started")
 			handler.SetStatus(http.StatusServiceUnavailable)
-			continue
-		}
-		if !isOwner && copyOp == nil {
-			b.logger.Info("Initiating copy operation...")
-			obj, copyOp = copier.InitializeCopyOperation()
-			if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
-				b.logger.Errorf("Could not set copy operation: %v", err)
-				handler.SetStatus(http.StatusServiceUnavailable)
-				continue
-			}
-			b.logger.Info("Copy operation initiated")
-		}
-		if copyOp != nil {
-			b.logger.Infof("Found copy operation with status %s", copyOp.Status)
-			handler.SetStatus(http.StatusServiceUnavailable)
-
-			if copyOp.Status == brtypes.OperationStatusInitial {
-				// Take the final full snapshot
-				b.logger.Infof("Taking final full snapshot...")
-				if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
-					b.logger.Errorf("Failed to take final full snapshot: %v", err)
-					continue
-				}
-
-				// Set copy operation status to Ready
-				b.logger.Infof("Setting copy operation status to Ready...")
-				copyOp.Status = brtypes.OperationStatusReady
-				if err := copier.SetCopyOperation(os, obj, copyOp); err != nil {
-					b.logger.Errorf("Failed to set copy operation status to Ready: %v", err)
-					continue
-				}
-			}
 
 			b.logger.Infof("Sleeping for 30 seconds...")
 			time.Sleep(30 * time.Second)
+			continue
+		}
+
+		b.logger.Infof("Checking owner ID...")
+		isOwner, err := b.isOwner()
+		if err != nil {
+			b.logger.Errorf("Could not check owner ID: %v", err)
+			handler.SetStatus(http.StatusServiceUnavailable)
+			continue
+		}
+		if !isOwner {
+			b.logger.Infof("The owner ID has changed, snapshotter will not be started")
+			handler.SetStatus(http.StatusServiceUnavailable)
+
+			b.logger.Infof("Taking final full snapshot...")
+			if _, err := ssr.TakeFullSnapshotAndResetTimer(true); err != nil {
+				b.logger.Errorf("Failed to take final full snapshot: %v", err)
+				continue
+			}
+
 			continue
 		}
 
@@ -311,7 +296,7 @@ func (b *BackupRestoreServer) runEtcdProbeLoopWithSnapshotter(ctx context.Contex
 			// need to take a full snapshot here
 			metrics.SnapshotRequired.With(prometheus.Labels{metrics.LabelKind: brtypes.SnapshotKindDelta}).Set(0)
 			metrics.SnapshotRequired.With(prometheus.Labels{metrics.LabelKind: brtypes.SnapshotKindFull}).Set(1)
-			if _, err := ssr.TakeFullSnapshotAndResetTimer(); err != nil {
+			if _, err := ssr.TakeFullSnapshotAndResetTimer(false); err != nil {
 				metrics.SnapshotterOperationFailure.With(prometheus.Labels{metrics.LabelError: err.Error()}).Inc()
 				b.logger.Errorf("Failed to take substitute first full snapshot: %v", err)
 				continue
@@ -430,35 +415,23 @@ func handleSsrStopRequest(ctx context.Context, handler *HTTPHandler, ssr *snapsh
 	}
 }
 
-func (b *BackupRestoreServer) handleTimerEvents(timer *time.Timer, os brtypes.ObjectStore, handler *HTTPHandler) {
+func (b *BackupRestoreServer) checkOwner(d time.Duration, handler *HTTPHandler) {
+	timer := time.NewTimer(d)
 	for {
 		select {
 		case <-timer.C:
 			func() {
-				defer timer.Reset(30 * time.Second)
+				defer timer.Reset(d)
 
-				b.logger.Infof("Checking owner...")
+				b.logger.Infof("Checking owner ID...")
 				isOwner, err := b.isOwner()
 				if err != nil {
-					b.logger.Errorf("Could not check owner: %v", err)
+					b.logger.Errorf("Could not check owner ID: %v", err)
 					b.stopSnapshotter(handler)
 					return
 				}
 				if !isOwner {
-					b.logger.Info("Owner check failed")
-					b.stopSnapshotter(handler)
-					return
-				}
-
-				b.logger.Infof("Getting copy operation...")
-				_, copyOp, err := copier.GetCopyOperation(os)
-				if err != nil {
-					b.logger.Errorf("Could not get copy operation: %v", err)
-					b.stopSnapshotter(handler)
-					return
-				}
-				if copyOp != nil {
-					b.logger.Info("Copy operation found")
+					b.logger.Info("The owner ID has changed, stopping snapshotter")
 					b.stopSnapshotter(handler)
 					return
 				}

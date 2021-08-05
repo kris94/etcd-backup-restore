@@ -51,8 +51,6 @@ const (
 	SnapshotKindDelta = "Incr"
 	// SnapshotKindChunk is constant for chunk snapshot kind.
 	SnapshotKindChunk = "Chunk"
-	// SnapshotKindObject is constant for object snapshot kind.
-	SnapshotKindObject = "Object"
 
 	// AzureBlobStorageHostName is the host name for azure blob storage service.
 	AzureBlobStorageHostName = "blob.core.windows.net"
@@ -86,6 +84,7 @@ type Snapshot struct {
 	IsChunk           bool      `json:"isChunk"`
 	Prefix            string    `json:"prefix"`            // Points to correct prefix of a snapshot in snapstore (Required for Backward Compatibility)
 	CompressionSuffix string    `json:"compressionSuffix"` // CompressionSuffix depends on compessionPolicy
+	IsFinal           bool      `json:"isFinal"`
 }
 
 // GenerateSnapshotName prepares the snapshot name from metadata
@@ -109,11 +108,8 @@ func (s *Snapshot) GetSnapshotDirectoryCreationTimeInUnix() (int64, error) {
 	return strconv.ParseInt(tok, 10, 64)
 }
 
-// GetDirectoryPrefix returns the appropriate snapshot directory prefix, either Object or Backup.
+// GetDirectoryPrefix returns the appropriate snapshot directory prefix (Backup).
 func (s *Snapshot) GetDirectoryPrefix() string {
-	if s.Kind == SnapshotKindObject {
-		return "Object"
-	}
 	return "Backup"
 }
 

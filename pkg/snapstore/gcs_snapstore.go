@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,6 +38,9 @@ import (
 
 const (
 	sourceStoreCredentials = "SOURCE_GOOGLE_APPLICATION_CREDENTIALS"
+
+	keyFinal  = "final"
+	keyCopied = "copied"
 )
 
 // GCSSnapStore is snapstore with GCS object store as backend.
@@ -158,6 +162,9 @@ func (s *GCSSnapStore) Save(snap brtypes.Snapshot, rc io.ReadCloser) error {
 	name := path.Join(s.prefix, snap.SnapDir, snap.SnapName)
 	obj := bh.Object(name)
 	c := obj.ComposerFrom(subObjects...)
+	if snap.IsFinal {
+		setMetadataBoolValue(c.ObjectAttrs(), keyFinal, true)
+	}
 	ctx, cancel := context.WithTimeout(context.TODO(), chunkUploadTimeout)
 	defer cancel()
 	if _, err := c.Run(ctx); err != nil {
@@ -240,9 +247,10 @@ func (s *GCSSnapStore) List() (brtypes.SnapList, error) {
 			if err != nil {
 				// Warning
 				logrus.Warnf("Invalid snapshot %s found, ignoring it: %v", v.Name, err)
-			} else {
-				snapList = append(snapList, snap)
+				continue
 			}
+			snap.IsFinal = getMetadataBoolValue(v, keyFinal)
+			snapList = append(snapList, snap)
 		}
 	}
 
@@ -261,4 +269,31 @@ func (s *GCSSnapStore) getPrefix(snap brtypes.Snapshot) string {
 		return snap.Prefix
 	}
 	return s.prefix
+}
+
+func getMetadataValue(oa *storage.ObjectAttrs, key string) string {
+	return oa.Metadata[key]
+}
+
+func setMetadataValue(oa *storage.ObjectAttrs, key, value string) {
+	if oa.Metadata == nil {
+		oa.Metadata = make(map[string]string)
+	}
+	oa.Metadata[key] = value
+}
+
+func getMetadataBoolValue(oa *storage.ObjectAttrs, key string) bool {
+	value := getMetadataValue(oa, key)
+	if value == "" {
+		return false
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		logrus.Warnf("Could not parse object metadata value %s for key %s as bool: %v", value, key, err)
+	}
+	return b
+}
+
+func setMetadataBoolValue(oa *storage.ObjectAttrs, key string, value bool) {
+	setMetadataValue(oa, key, strconv.FormatBool(value))
 }

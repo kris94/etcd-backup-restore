@@ -142,8 +142,10 @@ func (cp *Compactor) Compact(ro *brtypes.RestoreOptions, needDefragmentation boo
 		return nil, fmt.Errorf("unable to determine if snapshot is compressed: %v", cmpctOptions.BaseSnapshot.CompressionSuffix)
 	}
 
+	isFinal := cmpctOptions.BaseSnapshot.IsFinal
+
 	cc := &compressor.CompressionConfig{Enabled: isCompressed, CompressionPolicy: compressionPolicy}
-	snapshot, err := etcdutil.TakeAndSaveFullSnapshot(snapshotReqCtx, client, cp.store, etcdRevision, cc, suffix, cp.logger)
+	snapshot, err := etcdutil.TakeAndSaveFullSnapshot(snapshotReqCtx, client, cp.store, etcdRevision, cc, suffix, isFinal, cp.logger)
 	if err != nil {
 		return nil, err
 	}

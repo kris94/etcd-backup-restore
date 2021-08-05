@@ -186,7 +186,7 @@ func garbageCollectChunks(store brtypes.SnapStore, snapList brtypes.SnapList, lo
 	for index := low; index < high; index++ {
 		snap := snapList[index]
 		// Only delete chunk snapshots of kind Full or Object
-		if (snap.Kind != brtypes.SnapshotKindFull && snap.Kind != brtypes.SnapshotKindObject) || !snap.IsChunk {
+		if snap.Kind != brtypes.SnapshotKindFull || !snap.IsChunk {
 			continue
 		}
 		snapPath := path.Join(snap.SnapDir, snap.SnapName)

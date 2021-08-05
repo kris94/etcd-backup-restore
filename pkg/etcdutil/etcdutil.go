@@ -119,7 +119,7 @@ func DefragmentData(defragCtx context.Context, client *clientv3.Client, endpoint
 }
 
 // TakeAndSaveFullSnapshot takes full snapshot and save it to store
-func TakeAndSaveFullSnapshot(ctx context.Context, client *clientv3.Client, store brtypes.SnapStore, lastRevision int64, cc *compressor.CompressionConfig, suffix string, logger *logrus.Entry) (*brtypes.Snapshot, error) {
+func TakeAndSaveFullSnapshot(ctx context.Context, client *clientv3.Client, store brtypes.SnapStore, lastRevision int64, cc *compressor.CompressionConfig, suffix string, isFinal bool, logger *logrus.Entry) (*brtypes.Snapshot, error) {
 	rc, err := client.Snapshot(ctx)
 	if err != nil {
 		return nil, &errors.EtcdError{
@@ -137,7 +137,7 @@ func TakeAndSaveFullSnapshot(ctx context.Context, client *clientv3.Client, store
 	logger.Infof("Successfully opened snapshot reader on etcd")
 
 	// Then save the snapshot to the store.
-	snapshot := snapstore.NewSnapshot(brtypes.SnapshotKindFull, 0, lastRevision, suffix)
+	snapshot := snapstore.NewSnapshot(brtypes.SnapshotKindFull, 0, lastRevision, suffix, isFinal)
 	startTime := time.Now()
 	if err := store.Save(*snapshot, rc); err != nil {
 		timeTaken := time.Since(startTime)
